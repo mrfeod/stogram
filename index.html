@@ -296,7 +296,7 @@
       <label class="range fixed-hidden">Гаусс <input id="gauss" type="range" min="0" max="100" step="0.1"
           value="3"><input id="gaussNum" class="num" type="number" step="0.1" value="3"></label>
       <label class="range depth-only fixed-hidden">Текстура <input id="texturePenalty" type="range" min="0" max="100"
-          step="1" value="75"><input id="texturePenaltyNum" class="num" type="number" step="1" value="75"></label>
+          step="1" value="0"><input id="texturePenaltyNum" class="num" type="number" step="1" value="0"></label>
       <label class="range fixed-hidden">◌ <input id="blobMin" type="range" min="0" max="1" step="0.01"
           value="0.05"><input id="blobMinNum" class="num" type="number" step="0.01" value="0.05"></label>
       <label class="range">≣ <input id="layers" type="range" min="2" max="12" step="1" value="5"><input id="layersNum"
@@ -364,6 +364,14 @@
       function sort9(a) {
         for (let i = 1; i < 9; i++) { const v = a[i]; let j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
       }
+      function sortN(a, n) {
+        for (let i = 1; i < n; i++) { const v = a[i]; let j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
+      }
+      function popcount32(v) {
+        v -= (v >>> 1) & 0x55555555;
+        v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+        return (((v + (v >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+      }
       function robustDepthClean(base, conf, w, h, bg, cropX, id) {
         let cur = base.slice();
         const vals = new Float32Array(9), devs = new Float32Array(9);
@@ -395,63 +403,103 @@
         const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
         const minDisp = -Math.max(2, Math.floor(p * .08));
         const dispCount = maxDisp - minDisp + 1;
-        const xStart = p + maxDisp + 2, xEnd = w - 2;
-        const best = new Float32Array(w * h), second = new Float32Array(w * h), raw = new Float32Array(w * h), conf = new Float32Array(w * h);
-        best.fill(Infinity); second.fill(Infinity);
-        const ring = [new Float32Array(w), new Float32Array(w), new Float32Array(w), new Float32Array(w), new Float32Array(w)];
-        const vertical = new Float32Array(w);
-        for (let d = minDisp; d <= maxDisp; d++) {
-          vertical.fill(0);
-          const shift = p - d;
-          for (let y = 0; y < h; y++) {
-            const row = ring[y % 5];
-            if (y >= 5) { for (let x = xStart; x < xEnd; x++) vertical[x] -= row[x]; }
-            const base = y * w;
-            let sum = 0;
-            const left = xStart - 2;
-            for (let xx = left; xx <= left + 4; xx++) {
-              const q = gray[base + xx] - gray[base + xx - shift];
-              sum += Math.min(q * q, 3600);
-            }
-            row[xStart] = sum;
-            for (let x = xStart + 1; x < xEnd; x++) {
-              let xx = x + 2; let q = gray[base + xx] - gray[base + xx - shift]; sum += Math.min(q * q, 3600);
-              xx = x - 3; q = gray[base + xx] - gray[base + xx - shift]; sum -= Math.min(q * q, 3600);
-              row[x] = sum;
-            }
-            for (let x = xStart; x < xEnd; x++) vertical[x] += row[x];
-            if (y >= 4) {
-              const cy = y - 2, outBase = cy * w;
-              for (let x = xStart; x < xEnd; x++) {
-                const i = outBase + x, cost = vertical[x];
-                if (cost < best[i]) { second[i] = best[i]; best[i] = cost; raw[i] = d; }
-                else if (cost < second[i]) second[i] = cost;
+        const xStart = p + maxDisp + 3, xEnd = w - 3, validW = Math.max(1, xEnd - xStart);
+        const pixels = validW * h, census = new Uint32Array(w * h);
+        // 5x5 Census descriptor: local ordering is much less sensitive to the source texture brightness.
+        for (let y = 2; y < h - 2; y++) for (let x = 2; x < w - 2; x++) {
+          const center = gray[y * w + x]; let bits = 0, bit = 0;
+          for (let yy = -2; yy <= 2; yy++) for (let xx = -2; xx <= 2; xx++) {
+            if (xx === 0 && yy === 0) continue;
+            if (gray[(y + yy) * w + x + xx] < center) bits |= (1 << bit);
+            bit++;
+          }
+          census[y * w + x] = bits >>> 0;
+        }
+        const costs = new Uint8Array(pixels * dispCount);
+        for (let y = 0; y < h; y++) for (let vx = 0; vx < validW; vx++) {
+          const x = xStart + vx, pi = y * validW + vx, a = census[y * w + x];
+          for (let di = 0; di < dispCount; di++) {
+            const d = minDisp + di, qx = x - (p - d), b = census[y * w + qx];
+            const censusCost = popcount32(a ^ b);
+            const intensityCost = Math.min(8, Math.abs(gray[y * w + x] - gray[y * w + qx]) / 12);
+            costs[pi * dispCount + di] = Math.min(31, Math.round(censusCost + intensityCost));
+          }
+          if ((y & 63) === 0 && vx === 0) postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
+        }
+        const aggregate = new Uint16Array(costs.length);
+        const prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
+        function addPath(startX, startY, dx, dy) {
+          let vx = startX, y = startY, first = true;
+          while (vx >= 0 && vx < validW && y >= 0 && y < h) {
+            const pi = y * validW + vx, off = pi * dispCount;
+            if (first) {
+              for (let di = 0; di < dispCount; di++) { cur[di] = costs[off + di]; aggregate[off + di] += cur[di]; }
+              first = false;
+            } else {
+              let prevMin = prev[0]; for (let di = 1; di < dispCount; di++) if (prev[di] < prevMin) prevMin = prev[di];
+              const px = xStart + vx - dx, py = y - dy;
+              const edge = Math.abs(gray[y * w + xStart + vx] - gray[py * w + px]);
+              const p1 = 2.2, p2 = Math.max(5, 18 - edge * .20);
+              for (let di = 0; di < dispCount; di++) {
+                let v = prev[di];
+                if (di > 0) v = Math.min(v, prev[di - 1] + p1);
+                if (di + 1 < dispCount) v = Math.min(v, prev[di + 1] + p1);
+                v = Math.min(v, prevMin + p2);
+                cur[di] = costs[off + di] + v - prevMin;
+                aggregate[off + di] = Math.min(65535, aggregate[off + di] + Math.round(cur[di]));
               }
             }
+            prev.set(cur); vx += dx; y += dy;
           }
-          postProgress(id, .08 + .68 * ((d - minDisp + 1) / dispCount), 'Расчёт смещения…');
+        }
+        // Four SGM directions. Each path favours piecewise-smooth disparity but relaxes at image edges.
+        for (let y = 0; y < h; y++) { addPath(0, y, 1, 0); addPath(validW - 1, y, -1, 0); }
+        postProgress(id, .48, 'SGM по горизонтали…');
+        for (let vx = 0; vx < validW; vx++) { addPath(vx, 0, 0, 1); addPath(vx, h - 1, 0, -1); }
+        postProgress(id, .70, 'SGM по вертикали…');
+        const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
+        for (let y = 0; y < h; y++) for (let vx = 0; vx < validW; vx++) {
+          const off = (y * validW + vx) * dispCount; let bestD = 0, best = Infinity, second = Infinity;
+          for (let di = 0; di < dispCount; di++) {
+            const v = aggregate[off + di];
+            if (v < best) { best = v; bestD = di; }
+          }
+          for (let di = 0; di < dispCount; di++) if (Math.abs(di - bestD) > 1 && aggregate[off + di] < second) second = aggregate[off + di];
+          const i = y * w + xStart + vx; raw[i] = minDisp + bestD;
+          conf[i] = Math.max(0, Math.min(1, (second - best) / Math.max(8, second)));
         }
         for (let y = 0; y < h; y++) {
-          let firstV = 0, firstC = 0;
-          for (let x = xStart; x < w; x++) { const i = y * w + x; if (Number.isFinite(best[i]) && second[i] > 0) { firstV = raw[i]; firstC = (second[i] - best[i]) / (second[i] + 1e-6); break; } }
-          for (let x = 0; x < xStart; x++) { const i = y * w + x; raw[i] = firstV; conf[i] = firstC * .6; }
-          for (let x = xStart; x < w; x++) { const i = y * w + x; conf[i] = Number.isFinite(second[i]) ? (second[i] - best[i]) / (second[i] + 1e-6) : 0; }
+          const src = y * w + xStart;
+          for (let x = 0; x < xStart; x++) { raw[y * w + x] = raw[src]; conf[y * w + x] = conf[src] * .5; }
+          for (let x = xEnd; x < w; x++) { raw[y * w + x] = raw[y * w + xEnd - 1]; conf[y * w + x] = conf[y * w + xEnd - 1] * .5; }
         }
         let t = raw, c = conf;
-        const vals = new Float32Array(9);
+        const vals = new Float32Array(25);
         for (let pass = 0; pass < 2; pass++) {
-          const out = new Float32Array(w * h), outC = new Float32Array(w * h);
-          for (let y = 1; y < h - 1; y++) {
-            for (let x = 1; x < w - 1; x++) {
-              let k = 0, cw = 0, cs = 0;
-              for (let yy = -1; yy <= 1; yy++)for (let xx = -1; xx <= 1; xx++) {
-                const j = (y + yy) * w + x + xx, ww = .25 + c[j]; vals[k++] = t[j]; cw += ww; cs += t[j] * ww;
+          const out = t.slice(), outC = c.slice();
+          const radius = pass === 0 ? 2 : 1;
+          for (let y = radius; y < h - radius; y++) {
+            for (let x = Math.max(xStart, radius); x < w - radius; x++) {
+              let k = 0;
+              for (let yy = -radius; yy <= radius; yy++) for (let xx = -radius; xx <= radius; xx++) vals[k++] = t[(y + yy) * w + x + xx];
+              sortN(vals, k);
+              const median = vals[k >> 1], i = y * w + x;
+              let weight = 0, sum = 0, support = 0;
+              for (let yy = -radius; yy <= radius; yy++) for (let xx = -radius; xx <= radius; xx++) {
+                const j = (y + yy) * w + x + xx, delta = Math.abs(t[j] - median);
+                if (delta <= 2.25) {
+                  const ww = .15 + Math.min(1, c[j] * 5);
+                  sum += t[j] * ww; weight += ww; support += Math.min(1, c[j] * 5);
+                }
               }
-              sort9(vals); const i = y * w + x;
-              out[i] = vals[4] * .6 + (cs / cw) * .4;
-              outC[i] = Math.min(1, c[i] * .45 + (cw / 9) * .25);
+              const consensus = weight > 0 ? sum / weight : median;
+              const ownConfidence = Math.max(0, Math.min(1, c[i] * 4));
+              const blend = .82 - ownConfidence * .62;
+              // Do not smear a strong, well-supported depth edge into its neighbour.
+              out[i] = ownConfidence > .65 && Math.abs(t[i] - median) > 2.5 ? t[i] : t[i] * (1 - blend) + consensus * blend;
+              outC[i] = Math.min(1, c[i] * .55 + (support / k) * .45);
             }
-            if ((y & 63) === 0) postProgress(id, .77 + pass * .05 + (y / h) * .045, 'Сглаживание смещения…');
+            if ((y & 63) === 0) postProgress(id, .74 + pass * .045 + (y / h) * .04, 'Заполнение ненадёжных областей…');
           }
           t = out; c = outC;
         }
@@ -835,9 +883,10 @@ void main(){
     updateLayerUi();
 
     function getScaledPixels(image) {
-      // Always analyze the original image resolution, exactly as requested.
-      const w = Math.max(1, image.naturalWidth);
-      const h = Math.max(1, image.naturalHeight);
+      // SGM keeps a disparity cost volume; cap analysis size to keep memory predictable.
+      const maxSide = 900, scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+      const w = Math.max(1, Math.round(image.naturalWidth * scale));
+      const h = Math.max(1, Math.round(image.naturalHeight * scale));
       const c = document.createElement('canvas'); c.width = w; c.height = h;
       const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(image, 0, 0, w, h);
       return { d: x.getImageData(0, 0, w, h).data, w, h };
@@ -1372,7 +1421,7 @@ void main(){
     // UI events
     syncPair(depthR, depthN); syncPair(qualityR, qualityN); syncPair(gaussR, gaussN); syncPair(textureR, textureN); syncPair(blobR, blobN); syncPair(layersR, layersN); syncPair(periodR, periodN); syncPair(meshSmoothR, meshSmoothN);
     setPair(qualityR, qualityN, 6);
-    setPair(textureR, textureN, 75);
+    setPair(textureR, textureN, 0);
     setPair(blobR, blobN, 0.05);
     setPair(gaussR, gaussN, 3);
     setPair(meshSmoothR, meshSmoothN, 60);
