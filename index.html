@@ -1,0 +1,1413 @@
+<!doctype html>
+<html lang="ru">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Stereogram Layered Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101114;
+      --panel: #1a1d24;
+      --line: #2b3040;
+      --text: #f5f7fa;
+      --muted: #a6adbb;
+      --accent: #7dd3fc
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      font: 14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: var(--text)
+    }
+
+    #app {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr
+    }
+
+    header {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 8px 10px;
+      background: rgba(18, 20, 25, .94);
+      border-bottom: 1px solid var(--line);
+      z-index: 2
+    }
+
+    button,
+    .file,
+    .seg label {
+      border: 1px solid var(--line);
+      background: #20242d;
+      color: var(--text);
+      border-radius: 9px;
+      padding: 7px 9px;
+      cursor: pointer;
+      min-width: 36px;
+      text-align: center
+    }
+
+    button:hover,
+    .file:hover,
+    .seg label:hover {
+      border-color: #4b5563
+    }
+
+    button.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(125, 211, 252, .25) inset;
+      background: #1d2d35
+    }
+
+    input[type=file] {
+      display: none
+    }
+
+    .seg {
+      display: flex;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden
+    }
+
+    .seg label {
+      border: 0;
+      border-radius: 0;
+      padding: 0
+    }
+
+    .seg input {
+      display: none
+    }
+
+    .seg span {
+      display: block;
+      padding: 7px 9px;
+      min-width: 34px;
+      text-align: center
+    }
+
+    .seg input:checked+span {
+      background: var(--accent);
+      color: #05131a
+    }
+
+    .range {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted)
+    }
+
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      padding: 2px 0
+    }
+
+    .check input {
+      accent-color: var(--accent)
+    }
+
+    .fixed-hidden {
+      display: none !important
+    }
+
+    input[type=range] {
+      width: 92px
+    }
+
+    .num {
+      width: 56px;
+      padding: 4px 6px;
+      border: 1px solid var(--line);
+      background: #20242d;
+      color: var(--text);
+      border-radius: 8px
+    }
+
+    #progressOverlay {
+      position: absolute;
+      left: 50%;
+      top: 22px;
+      transform: translateX(-50%);
+      z-index: 10;
+      width: min(520px, calc(100% - 36px));
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(26, 29, 36, .94);
+      box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+      backdrop-filter: blur(10px);
+      pointer-events: none
+    }
+
+    #progressOverlay[hidden] {
+      display: none !important
+    }
+
+    #progressText {
+      margin-bottom: 7px;
+      color: var(--text);
+      font-size: 13px
+    }
+
+    .progressTrack {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #303644
+    }
+
+    .progressFill {
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      border-radius: inherit;
+      transition: width .12s linear
+    }
+
+    main {
+      position: relative;
+      min-height: 0
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none
+    }
+
+    #depthView {
+      position: absolute;
+      inset: 0;
+      display: none;
+      background: #090b0f;
+      image-rendering: auto
+    }
+
+    #drop {
+      position: absolute;
+      inset: 22px;
+      border: 2px dashed #3b4250;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+      pointer-events: none
+    }
+
+    #drop[hidden] {
+      display: none !important
+    }
+
+    #drop strong {
+      display: block;
+      color: var(--text);
+      font-size: 22px;
+      margin-bottom: 6px
+    }
+
+    #thumb {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      width: min(28vw, 240px);
+      max-height: 28vh;
+      object-fit: contain;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #000
+    }
+
+    .disabled {
+      opacity: .45;
+      pointer-events: none
+    }
+
+    @media(max-width:860px) {
+      header {
+        gap: 6px;
+        padding: 8px
+      }
+
+      .range {
+        font-size: 12px
+      }
+
+      input[type=range] {
+        width: 78px
+      }
+
+      .num {
+        width: 58px;
+        padding: 4px 6px;
+        font-size: 12px
+      }
+
+      #thumb {
+        width: 112px;
+        bottom: 58px
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <header>
+      <label class="file">＋<input id="file" type="file" accept="image/*"></label>
+      <button id="analyze">↻</button>
+      <button id="reset">⊕</button>
+      <button id="auto">▶</button>
+
+      <div class="seg">
+        <label><input type="radio" name="shape" value="1" checked><span>◠</span></label>
+        <label><input type="radio" name="shape" value="-1"><span>◡</span></label>
+      </div>
+
+      <div class="seg">
+        <label><input type="radio" name="viewmode" value="surface" checked><span>△</span></label>
+        <label><input type="radio" name="viewmode" value="layers"><span>≣</span></label>
+        <label><input type="radio" name="viewmode" value="depthmap"><span>▥</span></label>
+      </div>
+
+      <label class="range">↕ <input id="depth" type="range" min="10" max="220" step="1" value="35"><input id="depthNum"
+          class="num" type="number" step="1" value="35"></label>
+      <label class="range fixed-hidden">Сетка <input id="quality" type="range" min="1" max="6" step="1" value="6"><input
+          id="qualityNum" class="num" type="number" step="1" value="6"></label>
+      <label class="range fixed-hidden">Гаусс <input id="gauss" type="range" min="0" max="100" step="0.1"
+          value="3"><input id="gaussNum" class="num" type="number" step="0.1" value="3"></label>
+      <label class="range depth-only fixed-hidden">Текстура <input id="texturePenalty" type="range" min="0" max="100"
+          step="1" value="75"><input id="texturePenaltyNum" class="num" type="number" step="1" value="75"></label>
+      <label class="range fixed-hidden">◌ <input id="blobMin" type="range" min="0" max="1" step="0.01"
+          value="0.05"><input id="blobMinNum" class="num" type="number" step="0.01" value="0.05"></label>
+      <label class="range">≣ <input id="layers" type="range" min="2" max="12" step="1" value="5"><input id="layersNum"
+          class="num" type="number" step="1" value="5"></label>
+      <label class="range">↔ <input id="period" type="range" min="1" max="720" step="1" value="90"><input id="periodNum"
+          class="num" type="number" step="1" value="90"></label>
+      <label class="range fixed-hidden">∩ <input id="meshSmooth" type="range" min="0" max="100" step="1"
+          value="60"><input id="meshSmoothNum" class="num" type="number" step="1" value="60"></label>
+    </header>
+    <main>
+      <canvas id="view"></canvas>
+      <canvas id="depthView"></canvas>
+      <div id="progressOverlay" hidden>
+        <div id="progressText">0%</div>
+        <div class="progressTrack">
+          <div id="progressBar" class="progressFill"></div>
+        </div>
+      </div>
+      <div id="drop">
+        <div><strong>＋</strong></div>
+      </div>
+      <img id="thumb" hidden alt="Исходная стереограмма">
+    </main>
+  </div>
+  <script>
+    'use strict';
+    const $ = s => document.querySelector(s);
+    const cv = $('#view'), depthCv = $('#depthView'), depthCtx = depthCv.getContext('2d'), fi = $('#file'), drop = $('#drop'), thumb = $('#thumb'), progressOverlay = $('#progressOverlay'), progressText = $('#progressText'), progressBar = $('#progressBar');
+    const depthR = $('#depth'), depthN = $('#depthNum'), qualityR = $('#quality'), qualityN = $('#qualityNum');
+    const gaussR = $('#gauss'), gaussN = $('#gaussNum'), textureR = $('#texturePenalty'), textureN = $('#texturePenaltyNum'), blobR = $('#blobMin'), blobN = $('#blobMinNum');
+    const layersR = $('#layers'), layersN = $('#layersNum');
+    const periodR = $('#period'), periodN = $('#periodNum');
+    const meshSmoothR = $('#meshSmooth'), meshSmoothN = $('#meshSmoothNum');
+    const autoBtn = $('#auto');
+    const gl = cv.getContext('webgl2', { alpha: false, antialias: true, powerPreference: 'high-performance' });
+    if (!gl) { alert('Нужен WebGL2'); throw new Error('WebGL2 unavailable'); }
+
+    let img = null;
+    let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
+    let colorMap = null, grayMap = null, confMap = null, rawDepth = null, processedDepth = null, cleanDepthMap = null, depthPreview = null, depthPreviewW = 0, depthPreviewH = 0;
+    let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0, pinch = 0;
+    let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(), dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
+    let meshIndexCount = 0, meshTimer = 0, processTimer = 0, disparityWorker = null, analysisJob = 0;
+    let meshSourceBounds = { minX: -1, maxX: 1, minY: -1, maxY: 1, minD: 0, maxD: 0 };
+    const CAMERA_LIGHT_X = -0.28, CAMERA_LIGHT_Y = 0.22, CAMERA_LIGHT_Z = 1.0;
+
+    function cleanupOptions() {
+      return { maskSmooth: false, fillHoles: false, inpaint: false, bilateral: false };
+    }
+
+    function status(_s) { }
+    function setProgress(value, _label) {
+      const v = Math.max(0, Math.min(1, Number(value) || 0));
+      progressOverlay.hidden = false;
+      progressBar.style.width = (v * 100).toFixed(1) + '%';
+      progressText.textContent = (v * 100).toFixed(0) + '%';
+    }
+    function hideProgress() { progressOverlay.hidden = true; progressBar.style.width = '0%'; }
+    function nextFrame() { return new Promise(resolve => requestAnimationFrame(() => resolve())); }
+    function disparityWorkerMain() {
+      'use strict';
+      function postProgress(id, value, label) { postMessage({ type: 'progress', id, value, label }); }
+      function percentile(arr, p) { if (!arr.length) return 0; const i = Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * p))); return arr[i]; }
+      function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a))); return t * t * (3 - 2 * t); }
+      function sort9(a) {
+        for (let i = 1; i < 9; i++) { const v = a[i]; let j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
+      }
+      function robustDepthClean(base, conf, w, h, bg, cropX, id) {
+        let cur = base.slice();
+        const vals = new Float32Array(9), devs = new Float32Array(9);
+        for (let pass = 0; pass < 2; pass++) {
+          const out = cur.slice();
+          for (let y = 1; y < h - 1; y++) {
+            for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
+              const i = y * w + x; let k = 0;
+              for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) vals[k++] = cur[(y + yy) * w + x + xx];
+              sort9(vals); const med = vals[4];
+              for (k = 0; k < 9; k++) devs[k] = Math.abs(vals[k] - med);
+              sort9(devs); const mad = devs[4];
+              const center = cur[i], dev = Math.abs(center - med), cf = Math.max(0, Math.min(1, conf[i] || 0));
+              const th = .010 + 2.8 * mad + (1 - cf) * .025;
+              let v = center; if (dev > th) v = med * .80 + center * .20;
+              const delta = v - bg, sep = Math.abs(delta);
+              const keep = smoothstep(.028, .11, sep) * (.45 + .55 * smoothstep(.015, .08, cf));
+              out[i] = Math.max(0, Math.min(1, bg + delta * (.14 + .86 * keep)));
+            }
+            if ((y & 63) === 0) postProgress(id, .88 + pass * .045 + (y / h) * .04, 'Очистка глубины…');
+          }
+          cur = out;
+        }
+        return cur;
+      }
+      onmessage = e => {
+        const { id, grayBuffer, w, h, p } = e.data;
+        const gray = new Float32Array(grayBuffer);
+        const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
+        const minDisp = -Math.max(2, Math.floor(p * .08));
+        const dispCount = maxDisp - minDisp + 1;
+        const xStart = p + maxDisp + 2, xEnd = w - 2;
+        const best = new Float32Array(w * h), second = new Float32Array(w * h), raw = new Float32Array(w * h), conf = new Float32Array(w * h);
+        best.fill(Infinity); second.fill(Infinity);
+        const ring = [new Float32Array(w), new Float32Array(w), new Float32Array(w), new Float32Array(w), new Float32Array(w)];
+        const vertical = new Float32Array(w);
+        for (let d = minDisp; d <= maxDisp; d++) {
+          vertical.fill(0);
+          const shift = p - d;
+          for (let y = 0; y < h; y++) {
+            const row = ring[y % 5];
+            if (y >= 5) { for (let x = xStart; x < xEnd; x++) vertical[x] -= row[x]; }
+            const base = y * w;
+            let sum = 0;
+            const left = xStart - 2;
+            for (let xx = left; xx <= left + 4; xx++) {
+              const q = gray[base + xx] - gray[base + xx - shift];
+              sum += Math.min(q * q, 3600);
+            }
+            row[xStart] = sum;
+            for (let x = xStart + 1; x < xEnd; x++) {
+              let xx = x + 2; let q = gray[base + xx] - gray[base + xx - shift]; sum += Math.min(q * q, 3600);
+              xx = x - 3; q = gray[base + xx] - gray[base + xx - shift]; sum -= Math.min(q * q, 3600);
+              row[x] = sum;
+            }
+            for (let x = xStart; x < xEnd; x++) vertical[x] += row[x];
+            if (y >= 4) {
+              const cy = y - 2, outBase = cy * w;
+              for (let x = xStart; x < xEnd; x++) {
+                const i = outBase + x, cost = vertical[x];
+                if (cost < best[i]) { second[i] = best[i]; best[i] = cost; raw[i] = d; }
+                else if (cost < second[i]) second[i] = cost;
+              }
+            }
+          }
+          postProgress(id, .08 + .68 * ((d - minDisp + 1) / dispCount), 'Расчёт смещения…');
+        }
+        for (let y = 0; y < h; y++) {
+          let firstV = 0, firstC = 0;
+          for (let x = xStart; x < w; x++) { const i = y * w + x; if (Number.isFinite(best[i]) && second[i] > 0) { firstV = raw[i]; firstC = (second[i] - best[i]) / (second[i] + 1e-6); break; } }
+          for (let x = 0; x < xStart; x++) { const i = y * w + x; raw[i] = firstV; conf[i] = firstC * .6; }
+          for (let x = xStart; x < w; x++) { const i = y * w + x; conf[i] = Number.isFinite(second[i]) ? (second[i] - best[i]) / (second[i] + 1e-6) : 0; }
+        }
+        let t = raw, c = conf;
+        const vals = new Float32Array(9);
+        for (let pass = 0; pass < 2; pass++) {
+          const out = new Float32Array(w * h), outC = new Float32Array(w * h);
+          for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+              let k = 0, cw = 0, cs = 0;
+              for (let yy = -1; yy <= 1; yy++)for (let xx = -1; xx <= 1; xx++) {
+                const j = (y + yy) * w + x + xx, ww = .25 + c[j]; vals[k++] = t[j]; cw += ww; cs += t[j] * ww;
+              }
+              sort9(vals); const i = y * w + x;
+              out[i] = vals[4] * .6 + (cs / cw) * .4;
+              outC[i] = Math.min(1, c[i] * .45 + (cw / 9) * .25);
+            }
+            if ((y & 63) === 0) postProgress(id, .77 + pass * .05 + (y / h) * .045, 'Сглаживание смещения…');
+          }
+          t = out; c = outC;
+        }
+        const samples = [];
+        for (let y = 4; y < h - 4; y += 3)for (let x = 4; x < w - 4; x += 3)samples.push(t[y * w + x]);
+        samples.sort((a, b) => a - b);
+        const lo = percentile(samples, .05), hi = percentile(samples, .95), inv = 1 / Math.max(1e-6, hi - lo);
+        let rawDepth = new Float32Array(w * h), confMap = new Float32Array(w * h);
+        const bins = new Uint32Array(64);
+        for (let i = 0; i < t.length; i++) {
+          const v = Math.max(0, Math.min(1, (t[i] - lo) * inv)); rawDepth[i] = v; confMap[i] = Math.max(0, Math.min(1, c[i] * 4)); bins[Math.max(0, Math.min(63, (v * 63) | 0))]++;
+        }
+        let bi = 0; for (let i = 1; i < 64; i++)if (bins[i] > bins[bi]) bi = i;
+        const bgDepth = bi / 63, cropX = Math.max(0, Math.min(w - 1, xStart));
+        rawDepth = robustDepthClean(rawDepth, confMap, w, h, bgDepth, cropX, id);
+        postMessage({ type: 'done', id, bgDepth, cropX, rawDepth: rawDepth.buffer, confMap: confMap.buffer }, [rawDepth.buffer, confMap.buffer]);
+      };
+    }
+    function createDisparityWorker() {
+      const src = '(' + disparityWorkerMain.toString() + ')()';
+      return new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    }
+    function currentShape() { return +document.querySelector('input[name="shape"]:checked').value; }
+    function currentViewMode() { return document.querySelector('input[name="viewmode"]:checked').value; }
+    function clampSliderValue(el, v) {
+      let n = Number(v);
+      if (!Number.isFinite(n)) n = Number(el.value) || 0;
+      const min = el.min !== '' ? Number(el.min) : -Infinity;
+      const max = el.max !== '' ? Number(el.max) : Infinity;
+      const step = (el.step && el.step !== 'any') ? Number(el.step) : 0;
+      n = Math.max(min, Math.min(max, n));
+      if (step > 0) { const base = Number.isFinite(min) ? min : 0; n = Math.round((n - base) / step) * step + base; const d = (String(step).split('.')[1] || '').length; n = Number(n.toFixed(d)); }
+      return n;
+    }
+    function formatValue(el, v) { const step = (el.step && el.step !== 'any') ? Number(el.step) : 0; const d = step > 0 ? (String(step).split('.')[1] || '').length : 0; return d > 0 ? Number(v).toFixed(d) : String(Math.round(v)); }
+    function commitPair(r, n, fireChange = true) { const v = clampSliderValue(r, n.value); r.value = String(v); n.value = formatValue(r, v); r.dispatchEvent(new Event('input', { bubbles: true })); if (fireChange) r.dispatchEvent(new Event('change', { bubbles: true })); }
+    function syncPair(r, n) {
+      const fromRange = () => { const v = clampSliderValue(r, r.value); r.value = String(v); n.value = formatValue(r, v); };
+      r.addEventListener('input', fromRange); r.addEventListener('change', fromRange); fromRange();
+      n.addEventListener('change', () => commitPair(r, n, true));
+      n.addEventListener('blur', () => commitPair(r, n, true));
+      n.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commitPair(r, n, true); n.blur(); } });
+    }
+    function setPair(r, n, v) { const x = clampSliderValue(r, v); r.value = String(x); n.value = formatValue(r, x); }
+    function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a))); return t * t * (3 - 2 * t); }
+    function percentile(arr, p) { if (!arr.length) return 0; const i = Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * p))); return arr[i]; }
+    function axisValues(start, end, step) { const a = []; for (let v = start; v < end; v += step) a.push(v); if (!a.length || a[a.length - 1] !== end - 1) a.push(end - 1); return a; }
+    function sched() { dirty = true; }
+    function pauseAuto(ms = 1800) { autoPauseUntil = performance.now() + ms; }
+    function resetCamera() { yaw = -.22; pitch = -.16; zoom = 1; autoBaseYaw = yaw; autoBasePitch = pitch; autoTime = 0; pauseAuto(700); sched(); }
+    function updateAutoButton() { autoBtn.textContent = '▶'; autoBtn.classList.toggle('active', !!autoRotate); }
+    function disableAutoRotate() { if (autoRotate) { autoRotate = false; updateAutoButton(); } }
+    function lightParams() {
+      return {
+        x: -0.5, y: 0.4, z: 0.5,
+        ambient: 0.7, diffuse: 0.9, fill: 0.0,
+        shadowStrength: 1.4, selfShade: 0.5,
+        specular: 0.1, shininess: 5.0,
+        biasBase: 0.02, biasSlope: 0.0, pcfRadius: 1.0,
+        shadowHardness: 0.7
+      };
+    }
+    function lightDirCameraSpace() { const p = lightParams(); const len = Math.hypot(p.x, p.y, p.z) || 1; return { x: p.x / len, y: p.y / len, z: p.z / len }; }
+
+    function compile(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    function program(vs, fs) { const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; }
+    const gProg = program(`#version 300 es
+precision highp float;
+layout(location=0) in vec2 aXY;
+layout(location=1) in float aDepth;
+layout(location=2) in vec3 aColor;
+layout(location=3) in vec2 aGradient;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect;
+out vec3 vColor;
+out vec3 vNormal;
+out vec3 vWorldPos;
+vec3 rotate3(vec3 p){
+  float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
+  vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
+  return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
+}
+void main(){
+  vec3 p=rotate3(vec3(aXY,aDepth*uDepthScale*uSign));
+  vec3 n=normalize(vec3(-aGradient.x*uDepthScale*uSign,-aGradient.y*uDepthScale*uSign,1.0));
+  n=normalize(rotate3(n));
+  float camDist=3.2;
+  float cz=camDist-p.z;
+  float f=2.41421356;
+  float nearP=.1, farP=30.0;
+  float zEye=-cz;
+  float A=(farP+nearP)/(nearP-farP);
+  float B=(2.0*farP*nearP)/(nearP-farP);
+  gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
+  vColor=aColor; vNormal=n; vWorldPos=p;
+}`,
+      `#version 300 es
+precision highp float;
+in vec3 vColor;
+in vec3 vNormal;
+in vec3 vWorldPos;
+layout(location=0) out vec4 outAlbedo;
+layout(location=1) out vec4 outNormal;
+layout(location=2) out vec4 outPosition;
+void main(){
+  outAlbedo=vec4(vColor,1.0);
+  outNormal=vec4(normalize(vNormal)*0.5+0.5,1.0);
+  outPosition=vec4(vWorldPos,1.0);
+}`);
+
+    const shadowProg = program(`#version 300 es
+precision highp float;
+layout(location=0) in vec2 aXY;
+layout(location=1) in float aDepth;
+uniform float uYaw,uPitch,uDepthScale,uSign;
+uniform mat4 uLightVP;
+vec3 rotate3(vec3 p){
+  float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
+  vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
+  return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
+}
+void main(){
+  vec3 p=rotate3(vec3(aXY,aDepth*uDepthScale*uSign));
+  gl_Position=uLightVP*vec4(p,1.0);
+}`,
+      `#version 300 es
+precision highp float;
+void main(){}`);
+
+    const lightProg = program(`#version 300 es
+precision highp float;
+const vec2 POS[6]=vec2[6](vec2(-1,-1),vec2(1,-1),vec2(-1,1),vec2(-1,1),vec2(1,-1),vec2(1,1));
+out vec2 vUV;
+void main(){
+  vec2 p=POS[gl_VertexID];
+  vUV=p*0.5+0.5;
+  gl_Position=vec4(p,0.0,1.0);
+}`,
+      `#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform sampler2D uAlbedoTex;
+uniform sampler2D uNormalTex;
+uniform sampler2D uPositionTex;
+uniform sampler2D uShadowTex;
+uniform vec2 uShadowTexel;
+uniform mat4 uLightVP;
+uniform vec3 uLightDir;
+uniform vec3 uCameraPos;
+uniform float uAmbient,uDiffuse,uFill,uShadowStrength,uSelfShade,uSpecular,uShininess,uBiasBase,uBiasSlope,uPcfRadius,uShadowHardness;
+out vec4 outColor;
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L){
+  vec4 sp=uLightVP*vec4(worldPos,1.0);
+  vec3 proj=sp.xyz/max(sp.w, 1e-6);
+  proj=proj*0.5+0.5;
+  if(proj.x<=0.0||proj.x>=1.0||proj.y<=0.0||proj.y>=1.0||proj.z<=0.0||proj.z>=1.0) return 0.0;
+  float bias=max(uBiasBase, uBiasSlope*(1.0-max(dot(N,L),0.0)));
+  float shadow=0.0;
+  for(int yy=-1;yy<=1;yy++) for(int xx=-1;xx<=1;xx++){
+    vec2 off=vec2(float(xx),float(yy))*uShadowTexel*uPcfRadius;
+    float depth=texture(uShadowTex, proj.xy+off).r;
+    shadow += (proj.z-bias>depth) ? 1.0 : 0.0;
+  }
+  float s=shadow/9.0;
+  float width=mix(0.45,0.02,clamp(uShadowHardness,0.0,1.0));
+  return smoothstep(0.5-width,0.5+width,s);
+}
+void main(){
+  vec4 a=texture(uAlbedoTex,vUV);
+  vec4 nTex=texture(uNormalTex,vUV);
+  vec4 pTex=texture(uPositionTex,vUV);
+  if(a.a<0.5 || pTex.a<0.5){ outColor=vec4(0.045,0.05,0.06,1.0); return; }
+  vec3 albedo=a.rgb;
+  vec3 N=normalize(nTex.xyz*2.0-1.0);
+  vec3 worldPos=pTex.xyz;
+  vec3 L=normalize(uLightDir);
+  vec3 V=normalize(uCameraPos-worldPos);
+  float ndl=max(dot(N,L),0.0);
+  float shadow=shadowFactor(worldPos,N,L);
+  float selfShade=0.0;
+  if(uSelfShade>0.0){
+    float curvature=clamp((length(dFdx(N))+length(dFdy(N)))*2.0,0.0,1.0);
+    float grazing=1.0-max(dot(N,V),0.0);
+    selfShade=uSelfShade*curvature*(0.35+0.65*grazing);
+  }
+  vec3 H=normalize(L+V);
+  float spec=pow(max(dot(N,H),0.0), max(1.0,uShininess));
+  float direct=(1.0-shadow*uShadowStrength)*uDiffuse*ndl;
+  float illumination=uAmbient + uFill + direct - selfShade;
+  vec3 color=albedo*illumination + vec3(uSpecular*spec*(1.0-shadow*uShadowStrength));
+  outColor=vec4(clamp(color,0.0,1.0),1.0);
+}`);
+
+    const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ebo = gl.createBuffer();
+    gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+    const stride = 8 * 4;
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 2 * 4);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 3 * 4);
+    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 6 * 4);
+    gl.bindVertexArray(null);
+    const quadVao = gl.createVertexArray();
+
+    const GU = { yaw: gl.getUniformLocation(gProg, 'uYaw'), pitch: gl.getUniformLocation(gProg, 'uPitch'), depth: gl.getUniformLocation(gProg, 'uDepthScale'), sign: gl.getUniformLocation(gProg, 'uSign'), zoom: gl.getUniformLocation(gProg, 'uZoom'), aspect: gl.getUniformLocation(gProg, 'uAspect') };
+    const SU = { yaw: gl.getUniformLocation(shadowProg, 'uYaw'), pitch: gl.getUniformLocation(shadowProg, 'uPitch'), depth: gl.getUniformLocation(shadowProg, 'uDepthScale'), sign: gl.getUniformLocation(shadowProg, 'uSign'), lightVP: gl.getUniformLocation(shadowProg, 'uLightVP') };
+    const LU = { albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'), normal: gl.getUniformLocation(lightProg, 'uNormalTex'), position: gl.getUniformLocation(lightProg, 'uPositionTex'), shadowTex: gl.getUniformLocation(lightProg, 'uShadowTex'), shadowTexel: gl.getUniformLocation(lightProg, 'uShadowTexel'), lightVP: gl.getUniformLocation(lightProg, 'uLightVP'), lightDir: gl.getUniformLocation(lightProg, 'uLightDir'), cameraPos: gl.getUniformLocation(lightProg, 'uCameraPos'), ambient: gl.getUniformLocation(lightProg, 'uAmbient'), diffuse: gl.getUniformLocation(lightProg, 'uDiffuse'), fill: gl.getUniformLocation(lightProg, 'uFill'), shadowStrength: gl.getUniformLocation(lightProg, 'uShadowStrength'), selfShade: gl.getUniformLocation(lightProg, 'uSelfShade'), specular: gl.getUniformLocation(lightProg, 'uSpecular'), shininess: gl.getUniformLocation(lightProg, 'uShininess'), biasBase: gl.getUniformLocation(lightProg, 'uBiasBase'), biasSlope: gl.getUniformLocation(lightProg, 'uBiasSlope'), pcfRadius: gl.getUniformLocation(lightProg, 'uPcfRadius'), shadowHardness: gl.getUniformLocation(lightProg, 'uShadowHardness') };
+
+    gl.getExtension('EXT_color_buffer_float');
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.CULL_FACE); gl.clearColor(.045, .05, .06, 1);
+    let shadowSize = 2048;
+    const shadowTex = gl.createTexture();
+    const shadowFbo = gl.createFramebuffer();
+    function initShadowMap() {
+      gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, shadowSize, shadowSize, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shadowTex, 0);
+      gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+      const shadowFboStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (shadowFboStatus !== gl.FRAMEBUFFER_COMPLETE) { console.error('Shadow framebuffer incomplete:', shadowFboStatus); }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    initShadowMap();
+
+    const gFbo = gl.createFramebuffer();
+    const gAlbedoTex = gl.createTexture();
+    const gNormalTex = gl.createTexture();
+    const gPositionTex = gl.createTexture();
+    const gDepthRb = gl.createRenderbuffer();
+    function initRenderTex(tex, internalFormat, format, type) {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, cv.width, cv.height, 0, format, type, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    function initGBuffer() {
+      initRenderTex(gAlbedoTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+      initRenderTex(gNormalTex, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
+      initRenderTex(gPositionTex, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, gDepthRb);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, cv.width, cv.height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, gFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gAlbedoTex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, gNormalTex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, gPositionTex, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, gDepthRb);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+
+    function mat4Identity() { const m = new Float32Array(16); m[0] = m[5] = m[10] = m[15] = 1; return m; }
+    function mat4Mul(a, b) { const out = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) out[c * 4 + r] = a[0 * 4 + r] * b[c * 4 + 0] + a[1 * 4 + r] * b[c * 4 + 1] + a[2 * 4 + r] * b[c * 4 + 2] + a[3 * 4 + r] * b[c * 4 + 3]; return out; }
+    function mat4Ortho(l, r, b, t, n, f) { const m = mat4Identity(); m[0] = 2 / (r - l); m[5] = 2 / (t - b); m[10] = -2 / (f - n); m[12] = -(r + l) / (r - l); m[13] = -(t + b) / (t - b); m[14] = -(f + n) / (f - n); return m; }
+    function vec3Norm(x, y, z) { const len = Math.hypot(x, y, z) || 1; return { x: x / len, y: y / len, z: z / len }; }
+    function vec3Cross(a, b) { return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }; }
+    function mat4LookAt(eye, center, up) {
+      const f = vec3Norm(center.x - eye.x, center.y - eye.y, center.z - eye.z);
+      let s = vec3Cross(f, up); s = vec3Norm(s.x, s.y, s.z);
+      const u = vec3Cross(s, f);
+      const m = mat4Identity();
+      m[0] = s.x; m[4] = s.y; m[8] = s.z;
+      m[1] = u.x; m[5] = u.y; m[9] = u.z;
+      m[2] = -f.x; m[6] = -f.y; m[10] = -f.z;
+      m[12] = -(s.x * eye.x + s.y * eye.y + s.z * eye.z);
+      m[13] = -(u.x * eye.x + u.y * eye.y + u.z * eye.z);
+      m[14] = (f.x * eye.x + f.y * eye.y + f.z * eye.z);
+      return m;
+    }
+
+    function transformPoint(m, p) {
+      return {
+        x: m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12],
+        y: m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
+        z: m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]
+      };
+    }
+    function rotatePoint(p, yaw, pitch) {
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const qx = p.x * cy + p.z * sy, qy = p.y, qz = -p.x * sy + p.z * cy;
+      return { x: qx, y: qy * cp - qz * sp, z: qy * sp + qz * cp };
+    }
+    function updateMeshBoundsFromVerts(verts) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minD = Infinity, maxD = -Infinity;
+      for (let i = 0; i < verts.length; i += 8) {
+        const x = verts[i], y = verts[i + 1], d = verts[i + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (d < minD) minD = d; if (d > maxD) maxD = d;
+      }
+      if (Number.isFinite(minX)) meshSourceBounds = { minX, maxX, minY, maxY, minD, maxD };
+    }
+    function computeLightVP() {
+      const d = lightDirCameraSpace();
+      const L = vec3Norm(d.x, d.y, d.z);
+      const scale = (+depthR.value || 0) / 100;
+      const sign = currentShape();
+      const b = meshSourceBounds;
+      const corners = [];
+      for (const x of [b.minX, b.maxX]) for (const y of [b.minY, b.maxY]) for (const d0 of [b.minD, b.maxD]) {
+        corners.push(rotatePoint({ x, y, z: d0 * scale * sign }, yaw, pitch));
+      }
+      let cminX = Infinity, cmaxX = -Infinity, cminY = Infinity, cmaxY = -Infinity, cminZ = Infinity, cmaxZ = -Infinity;
+      for (const p of corners) {
+        if (p.x < cminX) cminX = p.x; if (p.x > cmaxX) cmaxX = p.x;
+        if (p.y < cminY) cminY = p.y; if (p.y > cmaxY) cmaxY = p.y;
+        if (p.z < cminZ) cminZ = p.z; if (p.z > cmaxZ) cmaxZ = p.z;
+      }
+      const center = { x: (cminX + cmaxX) * 0.5, y: (cminY + cmaxY) * 0.5, z: (cminZ + cmaxZ) * 0.5 };
+      let radius = 0.1;
+      for (const p of corners) {
+        const dx = p.x - center.x, dy = p.y - center.y, dz = p.z - center.z;
+        radius = Math.max(radius, Math.hypot(dx, dy, dz));
+      }
+      const eye = { x: center.x + L.x * (radius * 2.2), y: center.y + L.y * (radius * 2.2), z: center.z + L.z * (radius * 2.2) };
+      const up = Math.abs(L.y) > 0.92 ? { x: 0, y: 0, z: 1 } : { x: 0, y: 1, z: 0 };
+      const view = mat4LookAt(eye, center, up);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const p of corners) {
+        const q = transformPoint(view, p);
+        if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x;
+        if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y;
+        if (q.z < minZ) minZ = q.z; if (q.z > maxZ) maxZ = q.z;
+      }
+      const pad = Math.max(0.08, radius * 0.12);
+      minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+      const nearP = Math.max(0.05, -(maxZ + pad));
+      const farP = Math.max(nearP + 0.1, -(minZ - pad));
+      const proj = mat4Ortho(minX, maxX, minY, maxY, nearP, farP);
+      return mat4Mul(proj, view);
+    }
+    function renderShadowMap(lightVP) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
+      gl.viewport(0, 0, shadowSize, shadowSize);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.colorMask(false, false, false, false);
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(1.5, 4.0);
+      gl.useProgram(shadowProg); gl.bindVertexArray(vao);
+      gl.uniform1f(SU.yaw, yaw); gl.uniform1f(SU.pitch, pitch); gl.uniform1f(SU.depth, (+depthR.value || 0) / 100); gl.uniform1f(SU.sign, currentShape());
+      gl.uniformMatrix4fv(SU.lightVP, false, lightVP);
+      gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+      gl.bindVertexArray(null);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+      gl.colorMask(true, true, true, true);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, cv.width, cv.height);
+    }
+    function renderGBuffer() {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, gFbo);
+      gl.viewport(0, 0, cv.width, cv.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.useProgram(gProg); gl.bindVertexArray(vao);
+      gl.uniform1f(GU.yaw, yaw); gl.uniform1f(GU.pitch, pitch); gl.uniform1f(GU.depth, (+depthR.value || 0) / 100);
+      gl.uniform1f(GU.sign, currentShape()); gl.uniform1f(GU.zoom, zoom); gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
+      gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+      gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    function resize() { const dpr = Math.min(devicePixelRatio || 1, 2), r = cv.getBoundingClientRect(); cv.width = Math.max(1, Math.round(r.width * dpr)); cv.height = Math.max(1, Math.round(r.height * dpr)); depthCv.width = cv.width; depthCv.height = cv.height; initGBuffer(); gl.viewport(0, 0, cv.width, cv.height); sched(); }
+    addEventListener('resize', resize);
+    resize();
+    function frame(now) { const dt = Math.min(50, now - lastFrame); lastFrame = now; if (processedDepth && autoRotate && !drag && now > autoPauseUntil) { autoTime += dt * 0.001; yaw = autoBaseYaw + Math.sin(autoTime * 0.72) * 0.55; pitch = autoBasePitch + Math.sin(autoTime * 0.41) * 0.14; dirty = true; } if (dirty) { dirty = false; render(); } requestAnimationFrame(frame); }
+    requestAnimationFrame(frame);
+
+    function updateLayerUi() {
+      const mode = currentViewMode();
+      layersR.parentElement.classList.toggle('disabled', mode !== 'layers');
+      const depthMode = mode === 'depthmap';
+      cv.style.display = depthMode ? 'none' : 'block';
+      depthCv.style.display = depthMode ? 'block' : 'none';
+      depthR.parentElement.classList.toggle('disabled', depthMode);
+      qualityR.parentElement.classList.toggle('disabled', depthMode);
+      document.querySelectorAll('.depth-only').forEach(el => el.classList.toggle('disabled', !depthMode));
+    }
+    updateLayerUi();
+
+    function getScaledPixels(image) {
+      // Always analyze the original image resolution, exactly as requested.
+      const w = Math.max(1, image.naturalWidth);
+      const h = Math.max(1, image.naturalHeight);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(image, 0, 0, w, h);
+      return { d: x.getImageData(0, 0, w, h).data, w, h };
+    }
+    function estimatePeriod(gray, w, h) {
+      const a = Math.max(8, Math.floor(w * .02)), b = Math.max(a + 2, Math.min(w - 1, Math.floor(w * .45)));
+      let best = a, bestErr = 1e30;
+      const sy = Math.max(2, Math.floor((h * .6) / 60));
+      for (let p = a; p <= b; p += 2) {
+        let err = 0, n = 0;
+        for (let y = Math.floor(h * .2); y < h * .8; y += sy) { const r = y * w; for (let x = p + 6; x < w - 6; x += 4) { err += Math.abs(gray[r + x] - gray[r + x - p]); n++; } }
+        err /= Math.max(1, n); if (err < bestErr) { bestErr = err; best = p; }
+      }
+      let refined = best;
+      for (let p = Math.max(1, best - 3); p <= Math.min(b, best + 3); p++) {
+        let err = 0, n = 0;
+        for (let y = Math.floor(h * .2); y < h * .8; y += sy) { const r = y * w; for (let x = p + 6; x < w - 6; x += 3) { err += Math.abs(gray[r + x] - gray[r + x - p]); n++; } }
+        err /= Math.max(1, n); if (err < bestErr) { bestErr = err; refined = p; }
+      }
+      return refined;
+    }
+    function gaussianKernel(sigma) {
+      if (sigma < .05) return { radius: 0, kernel: new Float32Array([1]) };
+      const radius = Math.min(24, Math.ceil(sigma * 3)), kernel = new Float32Array(radius * 2 + 1); let sum = 0;
+      for (let i = -radius; i <= radius; i++) { const v = Math.exp(-(i * i) / (2 * sigma * sigma)); kernel[i + radius] = v; sum += v; }
+      for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+      return { radius, kernel };
+    }
+    function gaussianBlur(src, w, h, sigma) {
+      const { radius, kernel } = gaussianKernel(sigma); if (radius === 0) return src.slice();
+      const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let s = 0; for (let k = -radius; k <= radius; k++) { const xx = Math.max(0, Math.min(w - 1, x + k)); s += src[y * w + xx] * kernel[k + radius]; } tmp[y * w + x] = s;
+      }
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let s = 0; for (let k = -radius; k <= radius; k++) { const yy = Math.max(0, Math.min(h - 1, y + k)); s += tmp[yy * w + x] * kernel[k + radius]; } out[y * w + x] = s;
+      }
+      return out;
+    }
+    function quantizeLayers(src, w, h, bg, levels) {
+      const out = new Float32Array(src.length); const vals = [];
+      for (let y = 2; y < h - 2; y += 2) for (let x = Math.max(cropX, 2); x < w - 2; x += 2) vals.push(src[y * w + x]);
+      vals.sort((a, b) => a - b); if (!vals.length) return src.slice();
+      const lo = percentile(vals, .03), hi = percentile(vals, .97), inv = 1 / Math.max(1e-6, hi - lo);
+      for (let i = 0; i < src.length; i++) {
+        let t = (src[i] - lo) * inv; t = Math.max(0, Math.min(1, t));
+        const q = Math.round(t * (levels - 1)) / Math.max(1, levels - 1);
+        out[i] = lo + q * (hi - lo);
+      }
+      return out;
+    }
+    function robustDepthClean(base, conf, w, h, bg) {
+      let cur = base.slice();
+      for (let pass = 0; pass < 2; pass++) {
+        const out = cur.slice();
+        const vals = [];
+        for (let y = 1; y < h - 1; y++) for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
+          const i = y * w + x;
+          vals.length = 0;
+          for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) vals.push(cur[(y + yy) * w + x + xx]);
+          vals.sort((a, b) => a - b);
+          const med = vals[4];
+          const devs = vals.map(v => Math.abs(v - med)).sort((a, b) => a - b);
+          const mad = devs[4];
+          const center = cur[i], dev = Math.abs(center - med);
+          const cf = Math.max(0, Math.min(1, conf[i] || 0));
+          const th = 0.010 + 2.8 * mad + (1 - cf) * 0.025;
+          let v = center;
+          if (dev > th) v = med * 0.80 + center * 0.20;
+          const delta = v - bg, sep = Math.abs(delta);
+          const keep = smoothstep(0.028, 0.11, sep) * (0.45 + 0.55 * smoothstep(0.015, 0.08, cf));
+          out[i] = Math.max(0, Math.min(1, bg + delta * (0.14 + 0.86 * keep)));
+        }
+        cur = out;
+      }
+      return cur;
+    }
+    function blockMedian(src, w, h, x, y, r) {
+      const vals = [];
+      const x0 = Math.max(cropX, x - r), x1 = Math.min(w - 1, x + r), y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+      for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) vals.push(src[yy * w + xx]);
+      vals.sort((a, b) => a - b); return vals[(vals.length / 2) | 0];
+    }
+
+    function activateImage(image, url, revokeUrl = false) {
+      img = image;
+      thumb.src = url;
+      thumb.hidden = false;
+      drop.hidden = true;
+      resetCamera();
+      autoRotate = true;
+      autoBaseYaw = yaw;
+      autoBasePitch = pitch;
+      autoTime = 0;
+      autoPauseUntil = 0;
+      updateAutoButton();
+      sched();
+      analyze()
+        .catch(err => { console.error(err); hideProgress(); })
+        .finally(() => { if (revokeUrl) URL.revokeObjectURL(url); });
+    }
+    function loadImage(file) {
+      const url = URL.createObjectURL(file), image = new Image();
+      image.onload = () => activateImage(image, url, true);
+      image.onerror = () => { URL.revokeObjectURL(url); status('Не удалось открыть изображение'); };
+      image.src = url;
+    }
+    async function loadImageUrl(url) {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Изображение: HTTP ${response.status}`);
+      loadImage(await response.blob());
+    }
+    async function loadRandomStartupImage() {
+      try {
+        const listUrl = new URL('./images.json', document.baseURI);
+        if (location.protocol === 'file:') {
+          throw new Error('Автозагрузка требует запуска страницы через HTTP, а не file://');
+        }
+        const response = await fetch(listUrl, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`images.json: HTTP ${response.status}`);
+        const data = await response.json();
+        if (!Array.isArray(data)) throw new Error('images.json должен содержать массив');
+        const files = data.filter(v => typeof v === 'string' && v.trim());
+        if (!files.length) throw new Error('В images.json нет изображений');
+        const selected = files[Math.floor(Math.random() * files.length)].trim();
+        await loadImageUrl(new URL(selected, listUrl).href);
+      } catch (err) {
+        console.error('Не удалось выбрать стартовое изображение:', err);
+      }
+    }
+
+    async function analyze() {
+      if (!img) return;
+      const job = ++analysisJob;
+      if (disparityWorker) { disparityWorker.terminate(); disparityWorker = null; }
+      setProgress(.01, 'Подготовка изображения…');
+      await nextFrame();
+      const { d, w, h } = getScaledPixels(img); mapW = w; mapH = h;
+      colorMap = new Uint8ClampedArray(w * h * 3);
+      const gray = new Float32Array(w * h);
+      const total = w * h;
+      for (let j = 0; j < total; j++) {
+        const i = j * 4;
+        gray[j] = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+        colorMap[j * 3] = d[i]; colorMap[j * 3 + 1] = d[i + 1]; colorMap[j * 3 + 2] = d[i + 2];
+        if ((j & 262143) === 0) { setProgress(.02 + .04 * (j / total), 'Подготовка изображения…'); await nextFrame(); if (job !== analysisJob) return; }
+      }
+      grayMap = gray;
+      setProgress(.065, 'Определение периода…'); await nextFrame();
+      const p = estimatePeriod(gray, w, h);
+      periodR.min = 1; periodR.max = w; setPair(periodR, periodN, p);
+      await recoverDepth(gray, w, h, p, job);
+    }
+
+    function recoverDepth(gray, w, h, p, existingJob = null) {
+      const job = existingJob ?? ++analysisJob;
+      if (disparityWorker) { disparityWorker.terminate(); disparityWorker = null; }
+      setProgress(.08, 'Расчёт смещения…');
+      disparityWorker = createDisparityWorker();
+      return new Promise((resolve, reject) => {
+        const worker = disparityWorker;
+        worker.onmessage = e => {
+          const m = e.data;
+          if (m.id !== job) return;
+          if (m.type === 'progress') { setProgress(m.value, m.label); return; }
+          if (m.type === 'done') {
+            if (job !== analysisJob) { worker.terminate(); resolve(); return; }
+            rawDepth = new Float32Array(m.rawDepth);
+            confMap = new Float32Array(m.confMap);
+            bgDepth = m.bgDepth; cropX = m.cropX;
+            worker.terminate(); if (disparityWorker === worker) disparityWorker = null;
+            setProgress(.97, 'Постобработка и построение поверхности…');
+            chooseDefaults();
+            reprocess(() => { if (job === analysisJob) hideProgress(); resolve(); });
+          }
+        };
+        worker.onerror = err => { if (disparityWorker === worker) disparityWorker = null; worker.terminate(); hideProgress(); reject(err); };
+        const grayCopy = gray.slice();
+        worker.postMessage({ id: job, grayBuffer: grayCopy.buffer, w, h, p }, [grayCopy.buffer]);
+      });
+    }
+
+    function chooseDefaults() {
+      // Preserve the user's Convex/Concave selection. HTML default is Convex.
+    }
+
+    function reprocess(onDone = null) {
+      clearTimeout(processTimer);
+      processTimer = setTimeout(() => {
+        if (!rawDepth) { if (onDone) onDone(); return; }
+        const sigma = (+gaussR.value || 0) / 12.5; // 0..100 -> 0..8 roughly
+        processedDepth = gaussianBlur(rawDepth, mapW, mapH, sigma);
+        rebuildDepthPreview();
+        buildMesh();
+        sched();
+        if (onDone) onDone();
+      }, 20);
+    }
+
+    function buildMesh() {
+      if (!processedDepth) return;
+      const stepPx = Math.max(2, 8 - (+qualityR.value || 6));
+      const xs = axisValues(cropX, mapW, stepPx), ys = axisValues(0, mapH, stepPx);
+      const nx = xs.length, ny = ys.length;
+      const visibleW = Math.max(1, mapW - 1 - cropX), centerX = (cropX + mapW - 1) * .5;
+      const sign = currentShape(), mode = currentViewMode();
+
+      if (mode === 'layers') {
+        // Independent horizontal cut-out planes. Convex and concave use opposite cut rules.
+        const layerSource = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ? cleanDepthMap : processedDepth;
+        const depthAt = (x, y) => Math.max(0, layerSource[y * mapW + x]);
+        const requested = Math.max(2, +layersR.value || 5);
+        let maxLevel = 0;
+        for (let gy = 0; gy < ny; gy++) for (let gx = 0; gx < nx; gx++) maxLevel = Math.max(maxLevel, depthAt(xs[gx], ys[gy]));
+        const levels = [];
+        for (let i = 0; i < requested; i++) levels.push(maxLevel * (i / Math.max(1, requested - 1)));
+
+        const layerCount = levels.length;
+        const vertsPerLayer = nx * ny;
+        const verts = new Float32Array(layerCount * vertsPerLayer * 8);
+        const indices = new Uint32Array(Math.max(0, layerCount * (nx - 1) * (ny - 1) * 6));
+        const eps = 1e-5, concave = sign < 0, masks = [];
+        for (let li = 0; li < layerCount; li++) {
+          const level = levels[li], mask = new Uint8Array(nx * ny);
+          for (let gy = 0; gy < ny; gy++) {
+            const y = ys[gy];
+            for (let gx = 0; gx < nx; gx++) {
+              const d = depthAt(xs[gx], y);
+              if (concave ? d <= level + eps : d >= level - eps) mask[gy * nx + gx] = 1;
+            }
+          }
+          masks.push(mask);
+        }
+
+        let vo = 0, iq = 0;
+        for (let li = 0; li < layerCount; li++) {
+          const level = levels[li], baseVertex = li * vertsPerLayer;
+          for (let gy = 0; gy < ny; gy++) {
+            const y = ys[gy];
+            for (let gx = 0; gx < nx; gx++) {
+              const x = xs[gx], src = y * mapW + x;
+              verts[vo++] = (x - centerX) / visibleW * 2;
+              verts[vo++] = (mapH * .5 - y) / visibleW * 2;
+              verts[vo++] = level;
+              verts[vo++] = colorMap[src * 3] / 255;
+              verts[vo++] = colorMap[src * 3 + 1] / 255;
+              verts[vo++] = colorMap[src * 3 + 2] / 255;
+              verts[vo++] = 0; verts[vo++] = 0;
+            }
+          }
+          const mask = masks[li];
+          for (let y = 0; y < ny - 1; y++) for (let x = 0; x < nx - 1; x++) {
+            const a = baseVertex + y * nx + x, b = a + 1, c = a + nx, d = c + 1;
+            const m00 = mask[y * nx + x], m10 = mask[y * nx + x + 1], m01 = mask[(y + 1) * nx + x], m11 = mask[(y + 1) * nx + x + 1];
+            if (m00 && m01 && m10) { indices[iq++] = a; indices[iq++] = c; indices[iq++] = b; }
+            if (m10 && m01 && m11) { indices[iq++] = b; indices[iq++] = c; indices[iq++] = d; }
+          }
+        }
+        meshIndexCount = iq;
+        updateMeshBoundsFromVerts(verts);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, iq), gl.STATIC_DRAW);
+        return;
+      }
+      // Continuous surface mode: build geometry from the cleaned depth-map result,
+      // so the same denoised depth estimation drives both the 2D depth preview and the 3D surface.
+      const surfaceMap = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ? cleanDepthMap : processedDepth;
+      let sampled = new Float32Array(nx * ny);
+      const radius = Math.min(2, Math.max(1, Math.floor(stepPx / 2)));
+      for (let gy = 0; gy < ny; gy++) {
+        const y = ys[gy];
+        for (let gx = 0; gx < nx; gx++) {
+          sampled[gy * nx + gx] = blockMedian(surfaceMap, mapW, mapH, xs[gx], y, radius);
+        }
+      }
+      const meshAmount = Math.max(0, Math.min(1, (+meshSmoothR.value || 0) / 100));
+      if (meshAmount > 0) {
+        let cur = sampled.slice();
+        const passes = 1 + (meshAmount > .45 ? 1 : 0) + (meshAmount > .75 ? 1 : 0);
+        const alpha = .12 + meshAmount * .55;
+        for (let pass = 0; pass < passes; pass++) {
+          const out = cur.slice();
+          for (let gy = 1; gy < ny - 1; gy++) for (let gx = 1; gx < nx - 1; gx++) {
+            const i = gy * nx + gx;
+            const avg = (cur[i - 1] + cur[i + 1] + cur[i - nx] + cur[i + nx]) * .25;
+            out[i] = cur[i] * (1 - alpha) + avg * alpha;
+          }
+          cur = out;
+        }
+        sampled = cur;
+      }
+      const verts = new Float32Array(nx * ny * 8); let o = 0;
+      for (let gy = 0; gy < ny; gy++) {
+        const y = ys[gy];
+        for (let gx = 0; gx < nx; gx++) {
+          const x = xs[gx], i = y * mapW + x;
+          const zm = sampled[gy * nx + gx];
+          const xm = Math.max(0, gx - 1), xp = Math.min(nx - 1, gx + 1), ym = Math.max(0, gy - 1), yp = Math.min(ny - 1, gy + 1);
+          const gradX = (sampled[gy * nx + xp] - sampled[gy * nx + xm]) * visibleW * .23;
+          const gradY = -(sampled[yp * nx + gx] - sampled[ym * nx + gx]) * visibleW * .23;
+          verts[o++] = (x - centerX) / visibleW * 2;
+          verts[o++] = (mapH * .5 - y) / visibleW * 2;
+          verts[o++] = zm;
+          verts[o++] = colorMap[i * 3] / 255;
+          verts[o++] = colorMap[i * 3 + 1] / 255;
+          verts[o++] = colorMap[i * 3 + 2] / 255;
+          verts[o++] = Math.max(-10, Math.min(10, gradX));
+          verts[o++] = Math.max(-10, Math.min(10, gradY));
+        }
+      }
+      const indices = new Uint32Array(Math.max(0, (nx - 1) * (ny - 1) * 6)); let q = 0;
+      for (let y = 0; y < ny - 1; y++) for (let x = 0; x < nx - 1; x++) {
+        const a = y * nx + x, b = a + 1, c = a + nx, d = c + 1;
+        const ia = ys[y] * mapW + xs[x], ib = ys[y] * mapW + xs[x + 1], ic = ys[y + 1] * mapW + xs[x], id = ys[y + 1] * mapW + xs[x + 1];
+        // In Surface mode keep triangles across depth steps so sharp changes become visible walls,
+        // not black holes; ordinary depth jumps stay connected.
+        indices[q++] = a; indices[q++] = c; indices[q++] = b;
+        indices[q++] = b; indices[q++] = c; indices[q++] = d;
+      }
+      meshIndexCount = q;
+      updateMeshBoundsFromVerts(verts);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, q), gl.STATIC_DRAW);
+    }
+
+    function depthColor(t) {
+      // perceptual-ish blue -> cyan -> yellow -> white ramp
+      t = Math.max(0, Math.min(1, t));
+      let r, g, b;
+      if (t < .33) { const u = t / .33; r = 12 + 18 * u; g = 18 + 125 * u; b = 45 + 175 * u; }
+      else if (t < .66) { const u = (t - .33) / .33; r = 30 + 210 * u; g = 143 + 92 * u; b = 220 - 165 * u; }
+      else { const u = (t - .66) / .34; r = 240 + 15 * u; g = 235 + 20 * u; b = 55 + 200 * u; }
+      return [r | 0, g | 0, b | 0];
+    }
+    function medianFilter3x3(src, w, h, passes = 1) {
+      let cur = src.slice();
+      const vals = new Float32Array(9);
+      for (let pass = 0; pass < passes; pass++) {
+        const out = cur.slice();
+        for (let y = 1; y < h - 1; y++)for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
+          let k = 0;
+          for (let yy = -1; yy <= 1; yy++)for (let xx = -1; xx <= 1; xx++)vals[k++] = cur[(y + yy) * w + x + xx];
+          for (let i = 1; i < 9; i++) { const v = vals[i]; let j = i - 1; while (j >= 0 && vals[j] > v) { vals[j + 1] = vals[j]; j--; } vals[j + 1] = v; }
+          out[y * w + x] = vals[4];
+        }
+        cur = out;
+      }
+      return cur;
+    }
+    function dilateMask(mask, w, h, r = 1) {
+      const out = new Uint8Array(mask.length);
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        let on = 0;
+        for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r) && !on; yy++) {
+          for (let xx = Math.max(cropX, x - r); xx <= Math.min(w - 1, x + r); xx++) {
+            if (mask[yy * w + xx]) { on = 1; break; }
+          }
+        }
+        out[y * w + x] = on;
+      }
+      return out;
+    }
+    function erodeMask(mask, w, h, r = 1) {
+      const out = new Uint8Array(mask.length);
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        let on = 1;
+        for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r) && on; yy++) {
+          for (let xx = Math.max(cropX, x - r); xx <= Math.min(w - 1, x + r); xx++) {
+            if (!mask[yy * w + xx]) { on = 0; break; }
+          }
+        }
+        out[y * w + x] = on;
+      }
+      return out;
+    }
+    function removeSmallComponents(mask, w, h, minSize) {
+      if (minSize <= 1) return mask.slice();
+      const out = mask.slice(), seen = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const start = y * w + x;
+        if (!out[start] || seen[start]) continue;
+        let head = 0, tail = 0; queue[tail++] = start; seen[start] = 1;
+        while (head < tail) {
+          const v = queue[head++], vx = v % w, vy = (v / w) | 0;
+          for (let yy = Math.max(0, vy - 1); yy <= Math.min(h - 1, vy + 1); yy++) for (let xx = Math.max(cropX, vx - 1); xx <= Math.min(w - 1, vx + 1); xx++) {
+            const n = yy * w + xx;
+            if (out[n] && !seen[n]) { seen[n] = 1; queue[tail++] = n; }
+          }
+        }
+        if (tail < minSize) for (let i = 0; i < tail; i++) out[queue[i]] = 0;
+      }
+      return out;
+    }
+    function weightedGaussian(values, weights, w, h, sigma) {
+      const num = new Float32Array(values.length);
+      for (let i = 0; i < values.length; i++)num[i] = values[i] * weights[i];
+      const bNum = gaussianBlur(num, w, h, sigma), bDen = gaussianBlur(weights, w, h, sigma), out = new Float32Array(values.length);
+      for (let i = 0; i < out.length; i++)out[i] = bDen[i] > .0001 ? bNum[i] / bDen[i] : 0;
+      return out;
+    }
+    function rebuildDepthPreview() {
+      depthPreview = null; depthPreviewW = 0; depthPreviewH = 0; cleanDepthMap = null;
+      if (!processedDepth || !grayMap || !mapW || !mapH) return;
+
+      const w = mapW, h = mapH, shape = currentShape();
+      const textureStrength = Math.max(0, Math.min(1, (+textureR.value || 0) / 100));
+      const minBlob = Math.max(0, Math.round((+blobR.value || 0) / 100 * Math.max(1, (w - cropX) * h)));
+
+      // 1) Signed disparity on the currently selected side.
+      const signed = new Float32Array(w * h), positives = [];
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const i = y * w + x;
+        const s = Math.max(0, processedDepth[i] - bgDepth);
+        signed[i] = s;
+        if ((x & 1) === 0 && (y & 1) === 0 && s > 0) positives.push(s);
+      }
+      positives.sort((a, b) => a - b);
+      const depthNoiseFloor = positives.length ? Math.max(.004, percentile(positives, .10) * .65) : .008;
+
+      // 2) Estimate high-frequency source texture: repeating stereogram texture should reduce confidence.
+      const graySmooth = gaussianBlur(grayMap, w, h, 1.35);
+      const texture = new Float32Array(w * h), texSamples = [];
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const i = y * w + x, v = Math.abs(grayMap[i] - graySmooth[i]);
+        texture[i] = v;
+        if ((x & 3) === 0 && (y & 3) === 0) texSamples.push(v);
+      }
+      texSamples.sort((a, b) => a - b);
+      const texLo = percentile(texSamples, .30), texHi = Math.max(texLo + 1e-6, percentile(texSamples, .97));
+      const texInv = 1 / (texHi - texLo);
+
+      // 3) Combine confidence, local coherence and texture penalty.
+      const localDepth = gaussianBlur(signed, w, h, 2.0);
+      let score = new Float32Array(w * h), active = [];
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const i = y * w + x, s = signed[i];
+        const cf = confMap ? Math.max(0, Math.min(1, confMap[i])) : 1;
+        const confWeight = smoothstep(.015, .12, cf);
+        const disagreement = Math.abs(s - localDepth[i]);
+        const coherence = 1 - smoothstep(.012, .075, disagreement);
+        const tex = Math.max(0, Math.min(1, (texture[i] - texLo) * texInv));
+        const texturePenalty = textureStrength * tex * (.20 + .80 * (1 - confWeight * coherence));
+        const depthGate = smoothstep(depthNoiseFloor, depthNoiseFloor * 3.0, s);
+        const keep = depthGate * confWeight * (.18 + .82 * coherence) * Math.max(.04, 1 - texturePenalty);
+        const v = s * keep;
+        score[i] = v;
+        if ((x & 1) === 0 && (y & 1) === 0 && v > 0) active.push(v);
+      }
+
+      // 4) Initial denoising + mask extraction.
+      score = medianFilter3x3(score, w, h, 2);
+      active.sort((a, b) => a - b);
+      const lowThreshold = active.length ? Math.max(.0015, percentile(active, .12) * .65) : .004;
+      let mask = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) mask[y * w + x] = score[y * w + x] > lowThreshold ? 1 : 0;
+
+      // 5) Keep only significant connected components. No contour/fill/inpaint/bilateral cleanup here.
+      mask = removeSmallComponents(mask, w, h, Math.max(1, minBlob));
+
+      // 6) Keep reliable depth inside the component mask and apply only a light median cleanup.
+      let clean = new Float32Array(w * h);
+      for (let i = 0; i < clean.length; i++) clean[i] = mask[i] ? score[i] : 0;
+      clean = medianFilter3x3(clean, w, h, 1);
+
+      // 8) Normalize to grayscale depth: black = far, white = near.
+      const nz = [];
+      for (let y = 0; y < h; y += 2) for (let x = cropX; x < w; x += 2) { const v = clean[y * w + x]; if (v > .0005) nz.push(v); }
+      nz.sort((a, b) => a - b);
+      const hi = nz.length ? Math.max(.02, percentile(nz, .985)) : 1, inv = 1 / Math.max(1e-6, hi);
+      cleanDepthMap = new Float32Array(w * h);
+      const srcW = Math.max(1, w - cropX), srcH = h;
+      const imgData = depthCtx.createImageData(srcW, srcH);
+      let o = 0;
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const lin = Math.max(0, Math.min(1, clean[y * w + x] * inv));
+        cleanDepthMap[y * w + x] = lin;
+        const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
+        const t = Math.pow(shown, .82);
+        const g = Math.max(0, Math.min(255, Math.round(t * 255)));
+        imgData.data[o++] = g; imgData.data[o++] = g; imgData.data[o++] = g; imgData.data[o++] = 255;
+      }
+      depthPreview = imgData; depthPreviewW = srcW; depthPreviewH = srcH;
+    }
+    function renderDepthMap() {
+      if (!depthPreview || !depthPreviewW || !depthPreviewH) {
+        depthCtx.clearRect(0, 0, depthCv.width, depthCv.height);
+        return;
+      }
+      const tmp = document.createElement('canvas');
+      tmp.width = depthPreviewW; tmp.height = depthPreviewH;
+      tmp.getContext('2d').putImageData(depthPreview, 0, 0);
+      depthCtx.clearRect(0, 0, depthCv.width, depthCv.height);
+      depthCtx.fillStyle = '#090b0f'; depthCtx.fillRect(0, 0, depthCv.width, depthCv.height);
+      const scale = Math.min(depthCv.width / depthPreviewW, depthCv.height / depthPreviewH) * .92;
+      const dw = Math.max(1, depthPreviewW * scale), dh = Math.max(1, depthPreviewH * scale);
+      const dx = (depthCv.width - dw) / 2, dy = (depthCv.height - dh) / 2;
+      depthCtx.imageSmoothingEnabled = true;
+      depthCtx.drawImage(tmp, dx, dy, dw, dh);
+    }
+
+    function render() {
+      if (currentViewMode() === 'depthmap') { renderDepthMap(); return; }
+      if (!processedDepth || !meshIndexCount) return;
+      const lightVP = computeLightVP();
+      renderShadowMap(lightVP);
+      renderGBuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, cv.width, cv.height);
+      gl.disable(gl.DEPTH_TEST);
+      gl.clearColor(.045, .05, .06, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(lightProg); gl.bindVertexArray(quadVao);
+      const lp = lightParams(), ld = lightDirCameraSpace();
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, gAlbedoTex); gl.uniform1i(LU.albedo, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, gNormalTex); gl.uniform1i(LU.normal, 1);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, gPositionTex); gl.uniform1i(LU.position, 2);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, shadowTex); gl.uniform1i(LU.shadowTex, 3);
+      gl.uniform2f(LU.shadowTexel, 1 / shadowSize, 1 / shadowSize);
+      gl.uniformMatrix4fv(LU.lightVP, false, lightVP);
+      gl.uniform3f(LU.lightDir, ld.x, ld.y, ld.z);
+      gl.uniform3f(LU.cameraPos, 0, 0, 3.2);
+      gl.uniform1f(LU.ambient, lp.ambient); gl.uniform1f(LU.diffuse, lp.diffuse); gl.uniform1f(LU.fill, lp.fill);
+      gl.uniform1f(LU.shadowStrength, lp.shadowStrength); gl.uniform1f(LU.selfShade, lp.selfShade); gl.uniform1f(LU.specular, lp.specular);
+      gl.uniform1f(LU.shininess, lp.shininess); gl.uniform1f(LU.biasBase, lp.biasBase); gl.uniform1f(LU.biasSlope, lp.biasSlope); gl.uniform1f(LU.pcfRadius, lp.pcfRadius); gl.uniform1f(LU.shadowHardness, lp.shadowHardness);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+      gl.enable(gl.DEPTH_TEST);
+    }
+
+    // UI events
+    syncPair(depthR, depthN); syncPair(qualityR, qualityN); syncPair(gaussR, gaussN); syncPair(textureR, textureN); syncPair(blobR, blobN); syncPair(layersR, layersN); syncPair(periodR, periodN); syncPair(meshSmoothR, meshSmoothN);
+    setPair(qualityR, qualityN, 6);
+    setPair(textureR, textureN, 75);
+    setPair(blobR, blobN, 0.05);
+    setPair(gaussR, gaussN, 3);
+    setPair(meshSmoothR, meshSmoothN, 60);
+    setPair(depthR, depthN, 35);
+    updateAutoButton();
+    $('#reset').onclick = resetCamera;
+    autoBtn.onclick = () => { autoRotate = !autoRotate; updateAutoButton(); if (autoRotate) { autoBaseYaw = yaw; autoBasePitch = pitch; autoTime = 0; autoPauseUntil = 0; } sched(); };
+    $('#analyze').onclick = () => analyze().catch(err => { console.error(err); hideProgress(); });
+    fi.onchange = () => fi.files[0] && loadImage(fi.files[0]);
+    ['dragenter', 'dragover'].forEach(n => addEventListener(n, e => e.preventDefault()));
+    addEventListener('drop', e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
+    periodR.onchange = () => {
+      if (!grayMap || !mapW || !mapH) return;
+      recoverDepth(grayMap, mapW, mapH, +periodR.value).catch(err => { console.error(err); hideProgress(); });
+    };
+    depthR.oninput = sched; gaussR.oninput = reprocess; textureR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; blobR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; layersR.oninput = reprocess;
+    qualityR.oninput = () => { clearTimeout(meshTimer); meshTimer = setTimeout(() => { buildMesh(); sched(); }, 50); };
+    document.querySelectorAll('input[name="shape"]').forEach(el => el.onchange = () => { rebuildDepthPreview(); if (currentViewMode() !== 'depthmap') buildMesh(); sched(); });
+    document.querySelectorAll('input[name="viewmode"]').forEach(el => el.onchange = () => { updateLayerUi(); reprocess(); sched(); });
+    meshSmoothR.oninput = () => { if (currentViewMode() !== 'depthmap') buildMesh(); sched(); };
+    meshSmoothR.onchange = meshSmoothR.oninput;
+
+    // pointer controls
+    cv.addEventListener('pointerdown', e => { disableAutoRotate(); drag = true; pauseAuto(); lastX = e.clientX; lastY = e.clientY; cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', e => { if (!drag) return; yaw += (e.clientX - lastX) * .008; pitch = Math.max(-1.35, Math.min(1.35, pitch + (e.clientY - lastY) * .008)); lastX = e.clientX; lastY = e.clientY; sched(); });
+    ['pointerup', 'pointercancel'].forEach(n => cv.addEventListener(n, () => { drag = false; autoBaseYaw = yaw; autoBasePitch = pitch; pauseAuto(); }));
+    cv.addEventListener('wheel', e => { e.preventDefault(); pauseAuto(); zoom = Math.max(.35, Math.min(4, zoom * Math.exp(-e.deltaY * .001))); sched(); }, { passive: false });
+    cv.addEventListener('touchstart', e => { disableAutoRotate(); if (e.touches.length === 2) pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }, { passive: true });
+    cv.addEventListener('touchmove', e => { if (e.touches.length === 2) { const p = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); if (pinch) zoom = Math.max(.35, Math.min(4, zoom * p / pinch)); pinch = p; pauseAuto(); sched(); } }, { passive: true });
+    cv.addEventListener('touchend', () => { pinch = 0; autoBaseYaw = yaw; autoBasePitch = pitch; pauseAuto(); });
+    cv.ondblclick = resetCamera;
+
+    resize();
+    loadRandomStartupImage();
+  </script>
+</body>
+
+</html>
