@@ -4,7 +4,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>Stereogram Layered Viewer</title>
+  <title>Stogram: Stereogram Viewer</title>
+  <link rel="icon" href="src/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="src/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="src/favicon/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="src/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="src/favicon/site.webmanifest">
+  <meta name="theme-color" content="#101114">
   <style>
     :root {
       color-scheme: dark;
@@ -1160,7 +1166,7 @@ void main(){
     }
     async function loadRandomStartupImage() {
       try {
-        const listUrl = new URL('./images.json', document.baseURI);
+        const listUrl = new URL('./src/images/images.json', document.baseURI);
         if (location.protocol === 'file:') {
           throw new Error('Автозагрузка требует запуска страницы через HTTP, а не file://');
         }
