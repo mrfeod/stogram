@@ -1597,8 +1597,13 @@ function smoothInsideMask(depth, mask, w, h, sigma = 4, finalSigma = 1.5) {
   const normalized = weightedGaussian(depth, weights, w, h, sigma);
   const smoothed = finalSigma > 0 ?
       gaussianBlur(normalized, w, h, finalSigma) : normalized;
+  const coverage = gaussianBlur(weights, w, h, 1.25);
   for (let i = 0; i < smoothed.length; i++) {
-    smoothed[i] *= closedMask[i];
+    // A soft coverage mask behaves like contour antialiasing: the geometry
+    // reaches the background over a couple of pixels instead of ending on a
+    // staircase-shaped binary edge.
+    const alpha = coverage[i] <= .01 ? 0 : smoothstep(.02, .98, coverage[i]);
+    smoothed[i] *= alpha;
     mask[i] = closedMask[i];
   }
   return smoothed;

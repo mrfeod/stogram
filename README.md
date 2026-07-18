@@ -75,6 +75,7 @@ Island and MAD spike removal
     ↓ hole filling and contour smoothing
 Weighted median
     ↓ mask-aware Gaussian smoothing
+Soft contour coverage (antialiasing)
     ↓
 Ready depth map
     ↓
