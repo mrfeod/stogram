@@ -2004,5 +2004,24 @@ cv.addEventListener('touchend', () => {
 });
 cv.ondblclick = resetCamera;
 
+function setStereogramView(open) {
+  thumb.classList.toggle('stereogram-view', open);
+  thumb.setAttribute('aria-expanded', String(open));
+  thumb.setAttribute(
+      'aria-label', open ? 'Закрыть полноэкранную стереограмму' :
+                           'Открыть стереограмму на весь экран');
+}
+thumb.addEventListener('click', () =>
+  setStereogramView(!thumb.classList.contains('stereogram-view')));
+thumb.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  setStereogramView(!thumb.classList.contains('stereogram-view'));
+});
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && thumb.classList.contains('stereogram-view'))
+    setStereogramView(false);
+});
+
 resize();
 loadRandomStartupImage();

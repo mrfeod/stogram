@@ -280,7 +280,8 @@
       object-fit: contain;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #000
+      background: #000;
+      cursor: zoom-in
     }
 
     .disabled {
@@ -312,4 +313,18 @@
         width: 112px;
         bottom: 58px
       }
+    }
+
+    #thumb.stereogram-view {
+      position: fixed;
+      z-index: 1000;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      max-height: none;
+      object-fit: contain;
+      border: 0;
+      border-radius: 0;
+      background: #000;
+      cursor: zoom-out
     }
