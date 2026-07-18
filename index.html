@@ -572,8 +572,8 @@ layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec3 aColor;
 layout(location=3) in vec2 aGradient;
-uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect;
-out vec3 vColor;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect;
+out vec2 vSourceUV;
 out vec3 vNormal;
 out vec3 vWorldPos;
 vec3 rotate3(vec3 p){
@@ -593,18 +593,20 @@ void main(){
   float A=(farP+nearP)/(nearP-farP);
   float B=(2.0*farP*nearP)/(nearP-farP);
   gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
-  vColor=aColor; vNormal=n; vWorldPos=p;
+  vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
+  vNormal=n; vWorldPos=p;
 }`,
       `#version 300 es
 precision highp float;
-in vec3 vColor;
+in vec2 vSourceUV;
 in vec3 vNormal;
 in vec3 vWorldPos;
+uniform sampler2D uSourceTex;
 layout(location=0) out vec4 outAlbedo;
 layout(location=1) out vec4 outNormal;
 layout(location=2) out vec4 outPosition;
 void main(){
-  outAlbedo=vec4(vColor,1.0);
+  outAlbedo=vec4(texture(uSourceTex,clamp(vSourceUV,0.0,1.0)).rgb,1.0);
   outNormal=vec4(normalize(vNormal)*0.5+0.5,1.0);
   outPosition=vec4(vWorldPos,1.0);
 }`);
@@ -702,12 +704,18 @@ void main(){
     gl.bindVertexArray(null);
     const quadVao = gl.createVertexArray();
 
-    const GU = { yaw: gl.getUniformLocation(gProg, 'uYaw'), pitch: gl.getUniformLocation(gProg, 'uPitch'), depth: gl.getUniformLocation(gProg, 'uDepthScale'), sign: gl.getUniformLocation(gProg, 'uSign'), zoom: gl.getUniformLocation(gProg, 'uZoom'), aspect: gl.getUniformLocation(gProg, 'uAspect') };
+    const GU = { yaw: gl.getUniformLocation(gProg, 'uYaw'), pitch: gl.getUniformLocation(gProg, 'uPitch'), depth: gl.getUniformLocation(gProg, 'uDepthScale'), sign: gl.getUniformLocation(gProg, 'uSign'), zoom: gl.getUniformLocation(gProg, 'uZoom'), aspect: gl.getUniformLocation(gProg, 'uAspect'), sourceTex: gl.getUniformLocation(gProg, 'uSourceTex'), sourceCrop: gl.getUniformLocation(gProg, 'uSourceCrop'), sourceAspect: gl.getUniformLocation(gProg, 'uSourceAspect') };
     const SU = { yaw: gl.getUniformLocation(shadowProg, 'uYaw'), pitch: gl.getUniformLocation(shadowProg, 'uPitch'), depth: gl.getUniformLocation(shadowProg, 'uDepthScale'), sign: gl.getUniformLocation(shadowProg, 'uSign'), lightVP: gl.getUniformLocation(shadowProg, 'uLightVP') };
     const LU = { albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'), normal: gl.getUniformLocation(lightProg, 'uNormalTex'), position: gl.getUniformLocation(lightProg, 'uPositionTex'), shadowTex: gl.getUniformLocation(lightProg, 'uShadowTex'), shadowTexel: gl.getUniformLocation(lightProg, 'uShadowTexel'), lightVP: gl.getUniformLocation(lightProg, 'uLightVP'), lightDir: gl.getUniformLocation(lightProg, 'uLightDir'), cameraPos: gl.getUniformLocation(lightProg, 'uCameraPos'), ambient: gl.getUniformLocation(lightProg, 'uAmbient'), diffuse: gl.getUniformLocation(lightProg, 'uDiffuse'), fill: gl.getUniformLocation(lightProg, 'uFill'), shadowStrength: gl.getUniformLocation(lightProg, 'uShadowStrength'), selfShade: gl.getUniformLocation(lightProg, 'uSelfShade'), specular: gl.getUniformLocation(lightProg, 'uSpecular'), shininess: gl.getUniformLocation(lightProg, 'uShininess'), biasBase: gl.getUniformLocation(lightProg, 'uBiasBase'), biasSlope: gl.getUniformLocation(lightProg, 'uBiasSlope'), pcfRadius: gl.getUniformLocation(lightProg, 'uPcfRadius'), shadowHardness: gl.getUniformLocation(lightProg, 'uShadowHardness') };
 
     gl.getExtension('EXT_color_buffer_float');
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.CULL_FACE); gl.clearColor(.045, .05, .06, 1);
+    const sourceTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sourceTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     let shadowSize = 2048;
     const shadowTex = gl.createTexture();
     const shadowFbo = gl.createFramebuffer();
@@ -860,6 +868,9 @@ void main(){
       gl.useProgram(gProg); gl.bindVertexArray(vao);
       gl.uniform1f(GU.yaw, yaw); gl.uniform1f(GU.pitch, pitch); gl.uniform1f(GU.depth, (+depthR.value || 0) / 100);
       gl.uniform1f(GU.sign, currentShape()); gl.uniform1f(GU.zoom, zoom); gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
+      gl.uniform1f(GU.sourceCrop, cropX / Math.max(1, mapW));
+      gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+      gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, sourceTex); gl.uniform1i(GU.sourceTex, 4);
       gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
       gl.bindVertexArray(null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -973,6 +984,9 @@ void main(){
 
     function activateImage(image, url, revokeUrl = false) {
       img = image;
+      gl.bindTexture(gl.TEXTURE_2D, sourceTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
       thumb.src = url;
       thumb.hidden = false;
       drop.hidden = true;
