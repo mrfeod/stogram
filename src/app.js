@@ -1587,6 +1587,22 @@ function weightedGaussian(values, weights, w, h, sigma) {
     out[i] = bDen[i] > .0001 ? bNum[i] / bDen[i] : 0;
   return out;
 }
+function smoothInsideMask(depth, mask, w, h, sigma = 4, finalSigma = 1.5) {
+  const closedMask = erodeMask(dilateMask(mask, w, h, 2), w, h, 2);
+  const weights = new Float32Array(mask.length);
+  for (let i = 0; i < weights.length; i++) weights[i] = closedMask[i];
+
+  // Normalized convolution prevents the black background from darkening the
+  // object near its contour.
+  const normalized = weightedGaussian(depth, weights, w, h, sigma);
+  const smoothed = finalSigma > 0 ?
+      gaussianBlur(normalized, w, h, finalSigma) : normalized;
+  for (let i = 0; i < smoothed.length; i++) {
+    smoothed[i] *= closedMask[i];
+    mask[i] = closedMask[i];
+  }
+  return smoothed;
+}
 function swapWeighted(values, weights, a, b) {
   const v = values[a], ww = weights[a];
   values[a] = values[b];
@@ -1715,6 +1731,7 @@ function rebuildDepthPreview() {
   clean = suppressDepthSpikes(clean, mask, w, h, SPECKLE_SIZE);
   clean = smoothDepthBoundary(clean, mask, w, h, 10);
   clean = weightedMedianDepth(clean, mask, confMap, null, w, h, MEDIAN_RADIUS);
+  clean = smoothInsideMask(clean, mask, w, h);
 
   const nz = [];
   for (let y = 0; y < h; y += 2)

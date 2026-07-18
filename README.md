@@ -74,6 +74,7 @@ Four-direction SGM
 Island and MAD spike removal
     ↓ hole filling and contour smoothing
 Weighted median
+    ↓ mask-aware Gaussian smoothing
     ↓
 Ready depth map
     ↓
