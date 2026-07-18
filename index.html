@@ -325,9 +325,9 @@
           class="num" type="number" step="1" value="5"></label>
       <label class="range">↔ <input id="period" type="range" min="1" max="720" step="1" value="90"><input id="periodNum"
           class="num" type="number" step="1" value="90"></label>
-      <label class="range">Depth px <input id="analysisSize" type="range" min="256" max="2048" step="32" value="512"><input
+      <label class="range fixed-hidden">Depth px <input id="analysisSize" type="range" min="256" max="2048" step="32" value="512"><input
           id="analysisSizeNum" class="num" type="number" step="32" value="512"></label>
-      <span id="depthQuality" class="range" title="Локальная уверенность disparity при выбранном периоде">C —</span>
+      <span id="depthQuality" class="range fixed-hidden" title="Локальная уверенность disparity при выбранном периоде">C —</span>
       <label class="range fixed-hidden">∩ <input id="meshSmooth" type="range" min="0" max="100" step="1"
           value="60"><input id="meshSmoothNum" class="num" type="number" step="1" value="60"></label>
     </header>
@@ -370,7 +370,7 @@
     const gl = cv.getContext('webgl2', { alpha: false, antialias: true, powerPreference: 'high-performance' });
     if (!gl) { alert('Нужен WebGL2'); throw new Error('WebGL2 unavailable'); }
 
-    let img = null;
+    let img = null, loadedDepthMap = false;
     let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
     let grayMap = null, confMap = null, rawDepth = null, processedDepth = null, cleanDepthMap = null, depthPreview = null, depthPreviewW = 0, depthPreviewH = 0;
     let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0, pinch = 0;
@@ -1074,8 +1074,15 @@ void main(){
       vals.sort((a, b) => a - b); return vals[(vals.length / 2) | 0];
     }
 
+    function updateSourceModeUi() {
+      periodR.parentElement.classList.toggle('disabled', loadedDepthMap);
+      analysisSizeR.parentElement.hidden = loadedDepthMap;
+      $('#depthQuality').hidden = loadedDepthMap;
+    }
+
     function activateImage(image, url, revokeUrl = false) {
-      img = image;
+      img = image; loadedDepthMap = false;
+      updateSourceModeUi();
       const sourceSize = Math.max(image.naturalWidth, image.naturalHeight);
       analysisSizeR.min = String(Math.min(256, sourceSize));
       analysisSizeR.max = String(sourceSize);
@@ -1102,9 +1109,34 @@ void main(){
     }
     function loadImage(file) {
       const url = URL.createObjectURL(file), image = new Image();
-      image.onload = () => activateImage(image, url, true);
+      image.onload = () => isGrayscaleImage(image) ? activateDepthImage(image, url, true) : activateImage(image, url, true);
       image.onerror = () => { URL.revokeObjectURL(url); status('Не удалось открыть изображение'); };
       image.src = url;
+    }
+    function isGrayscaleImage(image) {
+      const side = 64, scale = Math.min(1, side / Math.max(image.naturalWidth, image.naturalHeight));
+      const w = Math.max(1, Math.round(image.naturalWidth * scale)), h = Math.max(1, Math.round(image.naturalHeight * scale));
+      const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true }); ctx.drawImage(image, 0, 0, w, h);
+      const data = ctx.getImageData(0, 0, w, h).data; let grayPixels = 0;
+      for (let p = 0; p < data.length; p += 4) if (Math.abs(data[p] - data[p + 1]) <= 2 && Math.abs(data[p + 1] - data[p + 2]) <= 2) grayPixels++;
+      return grayPixels / Math.max(1, data.length / 4) >= .99;
+    }
+    function activateDepthImage(image, url, revokeUrl = false) {
+      img = image; loadedDepthMap = true; analysisJob++;
+      updateSourceModeUi();
+      if (disparityWorker) { disparityWorker.terminate(); disparityWorker = null; }
+      gl.bindTexture(gl.TEXTURE_2D, sourceTex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      const canvas = document.createElement('canvas'); mapW = canvas.width = image.naturalWidth; mapH = canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true }); ctx.drawImage(image, 0, 0);
+      const pixels = ctx.getImageData(0, 0, mapW, mapH).data;
+      rawDepth = new Float32Array(mapW * mapH); grayMap = new Float32Array(mapW * mapH); confMap = new Float32Array(mapW * mapH); confMap.fill(1);
+      for (let i = 0; i < rawDepth.length; i++) { const p = i * 4, gray = pixels[p] * .299 + pixels[p + 1] * .587 + pixels[p + 2] * .114; grayMap[i] = gray; rawDepth[i] = gray / 255; }
+      processedDepth = rawDepth.slice(); cropX = 0; bgDepth = 0;
+      if (revokeUrl) thumb.onload = () => { URL.revokeObjectURL(url); thumb.onload = null; };
+      thumb.src = url; thumb.hidden = false; drop.hidden = true; $('#depthQuality').textContent = 'Depth map';
+      resetCamera(); autoRotate = true; updateAutoButton(); rebuildDepthPreview(); buildMesh(); sched(); hideProgress();
     }
     async function loadImageUrl(url) {
       const response = await fetch(url, { cache: 'no-store' });
@@ -1191,7 +1223,7 @@ void main(){
       processTimer = setTimeout(() => {
         if (!rawDepth) { if (onDone) onDone(); return; }
         const sigma = (+gaussR.value || 0) / 12.5; // 0..100 -> 0..8 roughly
-        processedDepth = gaussianBlur(rawDepth, mapW, mapH, sigma);
+        processedDepth = loadedDepthMap ? rawDepth.slice() : gaussianBlur(rawDepth, mapW, mapH, sigma);
         rebuildDepthPreview();
         buildMesh();
         sched();
@@ -1484,6 +1516,15 @@ void main(){
       if (!processedDepth || !grayMap || !mapW || !mapH) return;
 
       const w = mapW, h = mapH, shape = currentShape();
+      if (loadedDepthMap) {
+        cleanDepthMap = processedDepth.slice(); depthPreviewW = w; depthPreviewH = h;
+        const imgData = depthCtx.createImageData(w, h);
+        for (let i = 0, o = 0; i < cleanDepthMap.length; i++) {
+          const g = Math.max(0, Math.min(255, Math.round(cleanDepthMap[i] * 255)));
+          imgData.data[o++] = g; imgData.data[o++] = g; imgData.data[o++] = g; imgData.data[o++] = 255;
+        }
+        depthPreview = imgData; return;
+      }
       const signed = new Float32Array(w * h), positives = [];
       for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
         const i = y * w + x;
@@ -1602,15 +1643,15 @@ void main(){
     updateAutoButton();
     $('#reset').onclick = resetCamera;
     autoBtn.onclick = () => { autoRotate = !autoRotate; updateAutoButton(); if (autoRotate) { autoBaseYaw = yaw; autoBasePitch = pitch; autoTime = 0; autoPauseUntil = 0; } sched(); };
-    $('#analyze').onclick = () => analyze().catch(err => { console.error(err); hideProgress(); });
+    $('#analyze').onclick = () => { if (!loadedDepthMap) analyze().catch(err => { console.error(err); hideProgress(); }); };
     fi.onchange = () => fi.files[0] && loadImage(fi.files[0]);
     ['dragenter', 'dragover'].forEach(n => addEventListener(n, e => e.preventDefault()));
     addEventListener('drop', e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
     periodR.onchange = () => {
-      if (!grayMap || !mapW || !mapH) return;
+      if (loadedDepthMap || !grayMap || !mapW || !mapH) return;
       recoverDepth(grayMap, mapW, mapH, +periodR.value).catch(err => { console.error(err); hideProgress(); });
     };
-    analysisSizeR.onchange = () => { if (img) analyze().catch(err => { console.error(err); hideProgress(); }); };
+    analysisSizeR.onchange = () => { if (img && !loadedDepthMap) analyze().catch(err => { console.error(err); hideProgress(); }); };
     depthR.oninput = sched; gaussR.oninput = reprocess; textureR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; blobR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; layersR.oninput = reprocess;
     qualityR.oninput = () => { clearTimeout(meshTimer); meshTimer = setTimeout(() => { buildMesh(); sched(); }, 50); };
     document.querySelectorAll('input[name="shape"]').forEach(el => el.onchange = () => { rebuildDepthPreview(); if (currentViewMode() !== 'depthmap') buildMesh(); sched(); });
