@@ -325,6 +325,9 @@
           class="num" type="number" step="1" value="5"></label>
       <label class="range">↔ <input id="period" type="range" min="1" max="720" step="1" value="90"><input id="periodNum"
           class="num" type="number" step="1" value="90"></label>
+      <label class="range">Depth px <input id="analysisSize" type="range" min="256" max="2048" step="32" value="512"><input
+          id="analysisSizeNum" class="num" type="number" step="32" value="512"></label>
+      <span id="depthQuality" class="range" title="Локальная уверенность disparity при выбранном периоде">C —</span>
       <label class="range fixed-hidden">∩ <input id="meshSmooth" type="range" min="0" max="100" step="1"
           value="60"><input id="meshSmoothNum" class="num" type="number" step="1" value="60"></label>
     </header>
@@ -360,6 +363,7 @@
     const gaussR = $('#gauss'), gaussN = $('#gaussNum'), textureR = $('#texturePenalty'), textureN = $('#texturePenaltyNum'), blobR = $('#blobMin'), blobN = $('#blobMinNum');
     const layersR = $('#layers'), layersN = $('#layersNum');
     const periodR = $('#period'), periodN = $('#periodNum');
+    const analysisSizeR = $('#analysisSize'), analysisSizeN = $('#analysisSizeNum');
     const meshSmoothR = $('#meshSmooth'), meshSmoothN = $('#meshSmoothNum');
     const autoBtn = $('#auto');
     const pipelineIds = ['speckleSize', 'fillRadius', 'medianRadius'];
@@ -368,7 +372,7 @@
 
     let img = null;
     let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
-    let colorMap = null, grayMap = null, confMap = null, rawDepth = null, processedDepth = null, cleanDepthMap = null, depthPreview = null, depthPreviewW = 0, depthPreviewH = 0;
+    let grayMap = null, confMap = null, rawDepth = null, processedDepth = null, cleanDepthMap = null, depthPreview = null, depthPreviewW = 0, depthPreviewH = 0;
     let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0, pinch = 0;
     let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(), dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
     let meshIndexCount = 0, meshTimer = 0, processTimer = 0, disparityWorker = null, analysisJob = 0;
@@ -489,16 +493,48 @@
         postProgress(id, .48, 'SGM по горизонтали…');
         for (let vx = 0; vx < validW; vx++) { addPath(vx, 0, 0, 1); addPath(vx, h - 1, 0, -1); }
         postProgress(id, .70, 'SGM по вертикали…');
-        const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
+        let dispIndex = new Int16Array(pixels), reliability = new Float32Array(pixels);
         for (let y = 0; y < h; y++) for (let vx = 0; vx < validW; vx++) {
-          const off = (y * validW + vx) * dispCount; let bestD = 0, best = Infinity, second = Infinity;
+          const pi = y * validW + vx, off = pi * dispCount; let bestD = 0, best = Infinity, second = Infinity;
           for (let di = 0; di < dispCount; di++) {
             const v = aggregate[off + di];
             if (v < best) { best = v; bestD = di; }
           }
           for (let di = 0; di < dispCount; di++) if (Math.abs(di - bestD) > 1 && aggregate[off + di] < second) second = aggregate[off + di];
-          const i = y * w + xStart + vx; raw[i] = minDisp + bestD;
-          conf[i] = Math.max(0, Math.min(1, (second - best) / Math.max(8, second)));
+          dispIndex[pi] = bestD;
+          reliability[pi] = Math.max(0, Math.min(1, (second - best) / Math.max(8, second)));
+        }
+        // Iterated conditional modes: re-check nearby disparities using the original
+        // SGM costs plus support from reliable neighbours. Image edges weaken support.
+        for (let pass = 0; pass < 3; pass++) {
+          const nextDisp = dispIndex.slice(), nextReliability = reliability.slice();
+          for (let y = 0; y < h; y++) for (let vx = 0; vx < validW; vx++) {
+            const pi = y * validW + vx, center = dispIndex[pi], range = reliability[pi] < .045 ? 3 : 2;
+            let bestD = center, bestEnergy = Infinity, secondEnergy = Infinity;
+            for (let di = Math.max(0, center - range); di <= Math.min(dispCount - 1, center + range); di++) {
+              let energy = aggregate[pi * dispCount + di];
+              for (let k = 0; k < 4; k++) {
+                const nx = vx + (k === 0 ? -1 : k === 1 ? 1 : 0), ny = y + (k === 2 ? -1 : k === 3 ? 1 : 0);
+                if (nx < 0 || nx >= validW || ny < 0 || ny >= h) continue;
+                const ni = ny * validW + nx, imageA = y * w + xStart + vx, imageB = ny * w + xStart + nx;
+                const edgeWeight = Math.exp(-Math.abs(gray[imageA] - gray[imageB]) / 20);
+                const neighbourWeight = (.15 + reliability[ni] * .85) * edgeWeight;
+                energy += 4.5 * neighbourWeight * Math.min(4, Math.abs(di - dispIndex[ni]));
+              }
+              if (energy < bestEnergy) { secondEnergy = bestEnergy; bestEnergy = energy; bestD = di; }
+              else if (energy < secondEnergy) secondEnergy = energy;
+            }
+            nextDisp[pi] = bestD;
+            const localConfidence = Math.max(0, Math.min(1, (secondEnergy - bestEnergy) / Math.max(8, secondEnergy)));
+            nextReliability[pi] = reliability[pi] * .6 + localConfidence * .4;
+          }
+          dispIndex = nextDisp; reliability = nextReliability;
+          postProgress(id, .71 + pass * .025, 'Проверка соседних смещений…');
+        }
+        const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
+        for (let y = 0; y < h; y++) for (let vx = 0; vx < validW; vx++) {
+          const pi = y * validW + vx, i = y * w + xStart + vx;
+          raw[i] = minDisp + dispIndex[pi]; conf[i] = reliability[pi];
         }
         for (let y = 0; y < h; y++) {
           const src = y * w + xStart;
@@ -602,8 +638,7 @@
 precision highp float;
 layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
-layout(location=2) in vec3 aColor;
-layout(location=3) in vec2 aGradient;
+layout(location=2) in vec2 aGradient;
 uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect;
 out vec2 vSourceUV;
 out vec3 vNormal;
@@ -728,11 +763,10 @@ void main(){
 
     const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ebo = gl.createBuffer();
     gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-    const stride = 8 * 4;
+    const stride = 5 * 4;
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, stride, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 2 * 4);
-    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 3 * 4);
-    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 6 * 4);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 3 * 4);
     gl.bindVertexArray(null);
     const quadVao = gl.createVertexArray();
 
@@ -828,7 +862,7 @@ void main(){
     }
     function updateMeshBoundsFromVerts(verts) {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minD = Infinity, maxD = -Infinity;
-      for (let i = 0; i < verts.length; i += 8) {
+      for (let i = 0; i < verts.length; i += 5) {
         const x = verts[i], y = verts[i + 1], d = verts[i + 2];
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
@@ -926,9 +960,10 @@ void main(){
     updateLayerUi();
 
     function getScaledPixels(image) {
-      // SGM keeps a disparity cost volume; cap analysis size to keep memory predictable.
-      const w = Math.max(1, image.naturalWidth);
-      const h = Math.max(1, image.naturalHeight);
+      const requested = Math.max(1, +analysisSizeR.value || Math.max(image.naturalWidth, image.naturalHeight));
+      const scale = Math.min(1, requested / Math.max(image.naturalWidth, image.naturalHeight));
+      const w = Math.max(1, Math.round(image.naturalWidth * scale));
+      const h = Math.max(1, Math.round(image.naturalHeight * scale));
       const c = document.createElement('canvas'); c.width = w; c.height = h;
       const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(image, 0, 0, w, h);
       return { d: x.getImageData(0, 0, w, h).data, w, h };
@@ -947,6 +982,32 @@ void main(){
         let err = 0, n = 0;
         for (let y = Math.floor(h * .2); y < h * .8; y += sy) { const r = y * w; for (let x = p + 6; x < w - 6; x += 3) { err += Math.abs(gray[r + x] - gray[r + x - p]); n++; } }
         err /= Math.max(1, n); if (err < bestErr) { bestErr = err; refined = p; }
+      }
+      // Global correlation is biased toward the average foreground spacing. In an
+      // autostereogram disparity shortens the repeat, so the base/background period
+      // is estimated from the upper robust percentile of local block matches.
+      const localShifts = [], searchLo = Math.max(a, refined - 5), searchHi = Math.min(b, refined + Math.max(10, Math.round(refined * .16)));
+      const gridY = Math.max(7, Math.round(h / 26)), gridX = Math.max(9, Math.round(w / 30));
+      for (let cy = 4; cy < h - 4; cy += gridY) for (let cx = searchHi + 4; cx < w - 4; cx += gridX) {
+        let localBest = refined, localCost = Infinity, localSecond = Infinity;
+        for (let shift = searchLo; shift <= searchHi; shift++) {
+          let cost = 0, count = 0;
+          for (let yy = -3; yy <= 3; yy += 2) for (let xx = -3; xx <= 3; xx++) {
+            const i = (cy + yy) * w + cx + xx, j = i - shift;
+            const lum = Math.min(50, Math.abs(gray[i] - gray[j]));
+            const gradA = gray[i + 1] - gray[i - 1], gradB = gray[j + 1] - gray[j - 1];
+            cost += lum * .4 + Math.min(60, Math.abs(gradA - gradB)) * .6; count++;
+          }
+          cost /= count;
+          if (cost < localCost) { localSecond = localCost; localCost = cost; localBest = shift; }
+          else if (cost < localSecond) localSecond = cost;
+        }
+        const uniqueness = (localSecond - localCost) / Math.max(1, localSecond);
+        if (uniqueness > .012) localShifts.push(localBest);
+      }
+      if (localShifts.length >= 8) {
+        localShifts.sort((x, y) => x - y);
+        return localShifts[Math.floor((localShifts.length - 1) * .88)];
       }
       return refined;
     }
@@ -1015,6 +1076,12 @@ void main(){
 
     function activateImage(image, url, revokeUrl = false) {
       img = image;
+      const sourceSize = Math.max(image.naturalWidth, image.naturalHeight);
+      analysisSizeR.min = String(Math.min(256, sourceSize));
+      analysisSizeR.max = String(sourceSize);
+      analysisSizeR.step = sourceSize > 512 ? '32' : '1';
+      analysisSizeN.min = analysisSizeR.min; analysisSizeN.max = analysisSizeR.max; analysisSizeN.step = analysisSizeR.step;
+      setPair(analysisSizeR, analysisSizeN, Math.min(512, sourceSize));
       gl.bindTexture(gl.TEXTURE_2D, sourceTex);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
@@ -1070,13 +1137,11 @@ void main(){
       setProgress(.01, 'Подготовка изображения…');
       await nextFrame();
       const { d, w, h } = getScaledPixels(img); mapW = w; mapH = h;
-      colorMap = new Uint8ClampedArray(w * h * 3);
       const gray = new Float32Array(w * h);
       const total = w * h;
       for (let j = 0; j < total; j++) {
         const i = j * 4;
         gray[j] = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
-        colorMap[j * 3] = d[i]; colorMap[j * 3 + 1] = d[i + 1]; colorMap[j * 3 + 2] = d[i + 2];
         if ((j & 262143) === 0) { setProgress(.02 + .04 * (j / total), 'Подготовка изображения…'); await nextFrame(); if (job !== analysisJob) return; }
       }
       grayMap = gray;
@@ -1102,6 +1167,9 @@ void main(){
             rawDepth = new Float32Array(m.rawDepth);
             confMap = new Float32Array(m.confMap);
             bgDepth = m.bgDepth; cropX = m.cropX;
+            let qualitySum = 0, qualityCount = 0;
+            for (let y = 0; y < h; y += 3) for (let x = cropX; x < w; x += 3) { qualitySum += smoothstep(.01, .12, confMap[y * w + x]); qualityCount++; }
+            $('#depthQuality').textContent = 'C ' + Math.round(100 * qualitySum / Math.max(1, qualityCount)) + '%';
             worker.terminate(); if (disparityWorker === worker) disparityWorker = null;
             setProgress(.97, 'Постобработка и построение поверхности…');
             chooseDefaults();
@@ -1151,7 +1219,7 @@ void main(){
 
         const layerCount = levels.length;
         const vertsPerLayer = nx * ny;
-        const verts = new Float32Array(layerCount * vertsPerLayer * 8);
+        const verts = new Float32Array(layerCount * vertsPerLayer * 5);
         const indices = new Uint32Array(Math.max(0, layerCount * (nx - 1) * (ny - 1) * 6));
         const eps = 1e-5, concave = sign < 0, masks = [];
         for (let li = 0; li < layerCount; li++) {
@@ -1176,9 +1244,6 @@ void main(){
               verts[vo++] = (x - centerX) / visibleW * 2;
               verts[vo++] = (mapH * .5 - y) / visibleW * 2;
               verts[vo++] = level;
-              verts[vo++] = colorMap[src * 3] / 255;
-              verts[vo++] = colorMap[src * 3 + 1] / 255;
-              verts[vo++] = colorMap[src * 3 + 2] / 255;
               verts[vo++] = 0; verts[vo++] = 0;
             }
           }
@@ -1223,7 +1288,7 @@ void main(){
         }
         sampled = cur;
       }
-      const verts = new Float32Array(nx * ny * 8); let o = 0;
+      const verts = new Float32Array(nx * ny * 5); let o = 0;
       for (let gy = 0; gy < ny; gy++) {
         const y = ys[gy];
         for (let gx = 0; gx < nx; gx++) {
@@ -1235,9 +1300,6 @@ void main(){
           verts[o++] = (x - centerX) / visibleW * 2;
           verts[o++] = (mapH * .5 - y) / visibleW * 2;
           verts[o++] = zm;
-          verts[o++] = colorMap[i * 3] / 255;
-          verts[o++] = colorMap[i * 3 + 1] / 255;
-          verts[o++] = colorMap[i * 3 + 2] / 255;
           verts[o++] = Math.max(-10, Math.min(10, gradX));
           verts[o++] = Math.max(-10, Math.min(10, gradY));
         }
@@ -1283,32 +1345,30 @@ void main(){
       }
       return cur;
     }
-    function dilateMask(mask, w, h, r = 1) {
-      const out = new Uint8Array(mask.length);
-      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
-        let on = 0;
-        for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r) && !on; yy++) {
-          for (let xx = Math.max(cropX, x - r); xx <= Math.min(w - 1, x + r); xx++) {
-            if (mask[yy * w + xx]) { on = 1; break; }
-          }
+    function morphMask(mask, w, h, r, dilate) {
+      if (r <= 0) return mask.slice();
+      const tmp = new Uint8Array(mask.length), out = new Uint8Array(mask.length);
+      const rowPrefix = new Int32Array(w + 1), colPrefix = new Int32Array(h + 1);
+      for (let y = 0; y < h; y++) {
+        rowPrefix.fill(0); const row = y * w;
+        for (let x = cropX; x < w; x++) rowPrefix[x + 1] = rowPrefix[x] + mask[row + x];
+        for (let x = cropX; x < w; x++) {
+          const x0 = Math.max(cropX, x - r), x1 = Math.min(w - 1, x + r), sum = rowPrefix[x1 + 1] - rowPrefix[x0];
+          tmp[row + x] = dilate ? (sum > 0 ? 1 : 0) : (sum === x1 - x0 + 1 ? 1 : 0);
         }
-        out[y * w + x] = on;
+      }
+      for (let x = cropX; x < w; x++) {
+        colPrefix[0] = 0;
+        for (let y = 0; y < h; y++) colPrefix[y + 1] = colPrefix[y] + tmp[y * w + x];
+        for (let y = 0; y < h; y++) {
+          const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r), sum = colPrefix[y1 + 1] - colPrefix[y0];
+          out[y * w + x] = dilate ? (sum > 0 ? 1 : 0) : (sum === y1 - y0 + 1 ? 1 : 0);
+        }
       }
       return out;
     }
-    function erodeMask(mask, w, h, r = 1) {
-      const out = new Uint8Array(mask.length);
-      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
-        let on = 1;
-        for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r) && on; yy++) {
-          for (let xx = Math.max(cropX, x - r); xx <= Math.min(w - 1, x + r); xx++) {
-            if (!mask[yy * w + xx]) { on = 0; break; }
-          }
-        }
-        out[y * w + x] = on;
-      }
-      return out;
-    }
+    function dilateMask(mask, w, h, r = 1) { return morphMask(mask, w, h, r, true); }
+    function erodeMask(mask, w, h, r = 1) { return morphMask(mask, w, h, r, false); }
     function removeSmallComponents(mask, w, h, minSize) {
       if (minSize <= 1) return mask.slice();
       const out = mask.slice(), seen = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
@@ -1362,9 +1422,7 @@ void main(){
       return out;
     }
     function smoothDepthBoundary(src, surfaceMask, w, h, radius = 10) {
-      // Build an inner mask one pixel at a time; the removed ring is the contour band.
-      let inner = surfaceMask.slice();
-      for (let pass = 0; pass < radius; pass++) inner = erodeMask(inner, w, h, 1);
+      const inner = erodeMask(surfaceMask, w, h, radius);
       const weights = new Float32Array(surfaceMask.length);
       for (let i = 0; i < weights.length; i++) weights[i] = surfaceMask[i] ? 1 : 0;
       // Normalized convolution averages only other surface pixels, never the black background.
@@ -1381,6 +1439,28 @@ void main(){
       return out;
     }
     function pipelineValue(id) { return +$('#' + id).value || 0; }
+    function swapWeighted(values, weights, a, b) {
+      const v = values[a], ww = weights[a]; values[a] = values[b]; weights[a] = weights[b]; values[b] = v; weights[b] = ww;
+    }
+    function selectWeightedMedian(values, weights, n, targetWeight) {
+      let left = 0, right = n - 1, target = targetWeight;
+      while (left <= right) {
+        const pivot = values[(left + right) >> 1];
+        let lt = left, i = left, gt = right;
+        while (i <= gt) {
+          if (values[i] < pivot) { swapWeighted(values, weights, i, lt); i++; lt++; }
+          else if (values[i] > pivot) { swapWeighted(values, weights, i, gt); gt--; }
+          else i++;
+        }
+        let lowerWeight = 0, equalWeight = 0;
+        for (i = left; i < lt; i++) lowerWeight += weights[i];
+        for (i = lt; i <= gt; i++) equalWeight += weights[i];
+        if (target <= lowerWeight) right = lt - 1;
+        else if (target <= lowerWeight + equalWeight) return pivot;
+        else { target -= lowerWeight + equalWeight; left = gt + 1; }
+      }
+      return values[Math.max(0, Math.min(n - 1, left))];
+    }
     function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
       const out = src.slice(), sampleStep = Math.max(1, Math.ceil(radius / 3));
       const samplesPerAxis = Math.floor(radius * 2 / sampleStep) + 1, maxN = samplesPerAxis ** 2;
@@ -1395,12 +1475,7 @@ void main(){
           const edge = guide ? Math.exp(-Math.abs(guide[j] - guide[i]) / guideScale) : 1;
           values[n] = src[j]; weights[n] = spatial * edge * (.15 + (confidence ? confidence[j] : 1)); totalWeight += weights[n]; n++;
         }
-        for (let a = 1; a < n; a++) {
-          const v = values[a], ww = weights[a]; let b = a - 1;
-          while (b >= 0 && values[b] > v) { values[b + 1] = values[b]; weights[b + 1] = weights[b]; b--; }
-          values[b + 1] = v; weights[b + 1] = ww;
-        }
-        let sum = 0; for (let a = 0; a < n; a++) { sum += weights[a]; if (sum >= totalWeight * .5) { out[i] = values[a]; break; } }
+        if (n) out[i] = selectWeightedMedian(values, weights, n, totalWeight * .5);
       }
       return out;
     }
@@ -1517,7 +1592,7 @@ void main(){
       el.addEventListener('input', () => { show(); refreshPipeline(); }); show();
     });
     ['pipeSpeckles', 'pipeFill', 'pipeMedian'].forEach(id => $('#' + id).addEventListener('change', refreshPipeline));
-    syncPair(depthR, depthN); syncPair(qualityR, qualityN); syncPair(gaussR, gaussN); syncPair(textureR, textureN); syncPair(blobR, blobN); syncPair(layersR, layersN); syncPair(periodR, periodN); syncPair(meshSmoothR, meshSmoothN);
+    syncPair(depthR, depthN); syncPair(qualityR, qualityN); syncPair(gaussR, gaussN); syncPair(textureR, textureN); syncPair(blobR, blobN); syncPair(layersR, layersN); syncPair(periodR, periodN); syncPair(analysisSizeR, analysisSizeN); syncPair(meshSmoothR, meshSmoothN);
     setPair(qualityR, qualityN, 6);
     setPair(textureR, textureN, 0);
     setPair(blobR, blobN, 0.05);
@@ -1535,6 +1610,7 @@ void main(){
       if (!grayMap || !mapW || !mapH) return;
       recoverDepth(grayMap, mapW, mapH, +periodR.value).catch(err => { console.error(err); hideProgress(); });
     };
+    analysisSizeR.onchange = () => { if (img) analyze().catch(err => { console.error(err); hideProgress(); }); };
     depthR.oninput = sched; gaussR.oninput = reprocess; textureR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; blobR.oninput = () => { rebuildDepthPreview(); if (currentViewMode() !== 'layers') buildMesh(); sched(); }; layersR.oninput = reprocess;
     qualityR.oninput = () => { clearTimeout(meshTimer); meshTimer = setTimeout(() => { buildMesh(); sched(); }, 50); };
     document.querySelectorAll('input[name="shape"]').forEach(el => el.onchange = () => { rebuildDepthPreview(); if (currentViewMode() !== 'depthmap') buildMesh(); sched(); });
