@@ -3,15 +3,14 @@
 An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
 
 <p align="center">
-  Strereogram<br>
+  Autostereogram<br>
   <img src="src/images/camel.jpg" alt="Camel stereogram" height="256"><br>
   ↓<br>Depth map<br>
   <img src="src/demo/depth.jpg" alt="Reconstructed camel depth map" height="256"><br>
   ↓<br>
-  3D surface
+  3D surface<br>
+  <video src="https://github.com/user-attachments/assets/64e0dce7-1e36-4c20-89b7-d53d04603865" height="256" controls></video>
 </p>
-
-https://github.com/user-attachments/assets/64e0dce7-1e36-4c20-89b7-d53d04603865
 
 ## Features
 
