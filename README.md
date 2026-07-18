@@ -1,6 +1,4 @@
-# Stogram: Stereogram Viewer
-
-<p align="center"><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="128"></p>
+<h1><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="48" align="absmiddle"> <a href="https://mrfeod.github.io/stogram/">Stogram: Stereogram Viewer</a></h1>
 
 An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
 

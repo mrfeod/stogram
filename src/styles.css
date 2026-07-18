@@ -41,7 +41,8 @@
 
     button,
     .file,
-    .seg label {
+    .seg label,
+    .github-link {
       border: 1px solid var(--line);
       background: #20242d;
       color: var(--text);
@@ -54,8 +55,16 @@
 
     button:hover,
     .file:hover,
-    .seg label:hover {
+    .seg label:hover,
+    .github-link:hover {
       border-color: #4b5563
+    }
+
+    header .github-link {
+      margin-inline-start: auto;
+      flex: 0 0 auto;
+      text-decoration: none;
+      white-space: nowrap
     }
 
     button.active {
