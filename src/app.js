@@ -11,13 +11,8 @@ const depthR = $('#depth'), depthN = $('#depthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
 const periodR = $('#period'), periodN = $('#periodNum');
 const autoBtn = $('#auto');
-const ANALYSIS_SIZE = 512;
-const ANALYSIS_SIGMA = 0.24;
 const MESH_STEP_PX = 2;
 const MESH_SMOOTH_AMOUNT = 0.6;
-const SPECKLE_SIZE = 200;
-const FILL_RADIUS = 8;
-const MEDIAN_RADIUS = 8;
 const gl = cv.getContext(
     'webgl2',
     {alpha: false, antialias: true, powerPreference: 'high-performance'});
@@ -27,15 +22,15 @@ if (!gl) {
 }
 
 let img = null, loadedDepthMap = false, textureLoaded = false;
-let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
-let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
+let mapW = 0, mapH = 0, cropX = 0;
+let rgbaMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, depthPreview = null, depthPreviewW = 0,
     depthPreviewH = 0;
 let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0,
     pinch = 0;
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
-let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
+let meshIndexCount = 0, processTimer = 0, depthWorker = null,
     analysisJob = 0;
 let meshSourceBounds = {minX: -1, maxX: 1, minY: -1, maxY: 1, minD: 0, maxD: 0};
 function setProgress(value, _label) {
@@ -51,335 +46,8 @@ function hideProgress() {
 function nextFrame() {
   return new Promise(resolve => requestAnimationFrame(() => resolve()));
 }
-function disparityWorkerMain() {
-  'use strict';
-  function postProgress(id, value, label) {
-    postMessage({type: 'progress', id, value, label});
-  }
-  function percentile(arr, p) {
-    if (!arr.length) return 0;
-    const i =
-        Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * p)));
-    return arr[i];
-  }
-  function smoothstep(a, b, x) {
-    const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a)));
-    return t * t * (3 - 2 * t);
-  }
-  function sort9(a) {
-    for (let i = 1; i < 9; i++) {
-      const v = a[i];
-      let j = i - 1;
-      while (j >= 0 && a[j] > v) {
-        a[j + 1] = a[j];
-        j--;
-      }
-      a[j + 1] = v;
-    }
-  }
-  function sortN(a, n) {
-    for (let i = 1; i < n; i++) {
-      const v = a[i];
-      let j = i - 1;
-      while (j >= 0 && a[j] > v) {
-        a[j + 1] = a[j];
-        j--;
-      }
-      a[j + 1] = v;
-    }
-  }
-  function popcount32(v) {
-    v -= (v >>> 1) & 0x55555555;
-    v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
-    return (((v + (v >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
-  }
-  function robustDepthClean(base, conf, w, h, bg, cropX, id) {
-    let cur = base.slice();
-    const vals = new Float32Array(9), devs = new Float32Array(9);
-    for (let pass = 0; pass < 2; pass++) {
-      const out = cur.slice();
-      for (let y = 1; y < h - 1; y++) {
-        for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
-          const i = y * w + x;
-          let k = 0;
-          for (let yy = -1; yy <= 1; yy++)
-            for (let xx = -1; xx <= 1; xx++)
-              vals[k++] = cur[(y + yy) * w + x + xx];
-          sort9(vals);
-          const med = vals[4];
-          for (k = 0; k < 9; k++) devs[k] = Math.abs(vals[k] - med);
-          sort9(devs);
-          const mad = devs[4];
-          const center = cur[i], dev = Math.abs(center - med),
-                cf = Math.max(0, Math.min(1, conf[i] || 0));
-          const th = .010 + 2.8 * mad + (1 - cf) * .025;
-          let v = center;
-          if (dev > th) v = med * .80 + center * .20;
-          const delta = v - bg, sep = Math.abs(delta);
-          const keep = smoothstep(.028, .11, sep) *
-              (.45 + .55 * smoothstep(.015, .08, cf));
-          out[i] = Math.max(0, Math.min(1, bg + delta * (.14 + .86 * keep)));
-        }
-        if ((y & 63) === 0)
-          postProgress(
-              id, .88 + pass * .045 + (y / h) * .04, 'Очистка глубины…');
-      }
-      cur = out;
-    }
-    return cur;
-  }
-  onmessage = e => {
-    const {id, grayBuffer, w, h, p} = e.data;
-    const gray = new Float32Array(grayBuffer);
-    const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
-    const minDisp = -Math.max(2, Math.floor(p * .08));
-    const dispCount = maxDisp - minDisp + 1;
-    // A single-image stereogram has no unique depth in its first repeat.
-    // Start matching at the first position where every disparity candidate
-    // has a valid previous repeat, but crop the result by exactly one period.
-    const xStart = p - minDisp + 2, xEnd = w - 3,
-          validW = Math.max(1, xEnd - xStart);
-    const pixels = validW * h, census = new Uint32Array(w * h);
-    // 5x5 Census descriptor: local ordering is much less sensitive to the
-    // source texture brightness.
-    for (let y = 2; y < h - 2; y++)
-      for (let x = 2; x < w - 2; x++) {
-        const center = gray[y * w + x];
-        let bits = 0, bit = 0;
-        for (let yy = -2; yy <= 2; yy++)
-          for (let xx = -2; xx <= 2; xx++) {
-            if (xx === 0 && yy === 0) continue;
-            if (gray[(y + yy) * w + x + xx] < center) bits |= (1 << bit);
-            bit++;
-          }
-        census[y * w + x] = bits >>> 0;
-      }
-    const costs = new Uint8Array(pixels * dispCount);
-    for (let y = 0; y < h; y++)
-      for (let vx = 0; vx < validW; vx++) {
-        const x = xStart + vx, pi = y * validW + vx, a = census[y * w + x];
-        for (let di = 0; di < dispCount; di++) {
-          const d = minDisp + di, qx = x - (p - d), b = census[y * w + qx];
-          const censusCost = popcount32(a ^ b);
-          const intensityCost =
-              Math.min(8, Math.abs(gray[y * w + x] - gray[y * w + qx]) / 12);
-          costs[pi * dispCount + di] =
-              Math.min(31, Math.round(censusCost + intensityCost));
-        }
-        if ((y & 63) === 0 && vx === 0)
-          postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
-      }
-    const aggregate = new Uint16Array(costs.length);
-    const prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
-    function addPath(startX, startY, dx, dy) {
-      let vx = startX, y = startY, first = true;
-      while (vx >= 0 && vx < validW && y >= 0 && y < h) {
-        const pi = y * validW + vx, off = pi * dispCount;
-        if (first) {
-          for (let di = 0; di < dispCount; di++) {
-            cur[di] = costs[off + di];
-            aggregate[off + di] += cur[di];
-          }
-          first = false;
-        } else {
-          let prevMin = prev[0];
-          for (let di = 1; di < dispCount; di++)
-            if (prev[di] < prevMin) prevMin = prev[di];
-          const px = xStart + vx - dx, py = y - dy;
-          const edge = Math.abs(gray[y * w + xStart + vx] - gray[py * w + px]);
-          const p1 = 2.2, p2 = Math.max(5, 18 - edge * .20);
-          for (let di = 0; di < dispCount; di++) {
-            let v = prev[di];
-            if (di > 0) v = Math.min(v, prev[di - 1] + p1);
-            if (di + 1 < dispCount) v = Math.min(v, prev[di + 1] + p1);
-            v = Math.min(v, prevMin + p2);
-            cur[di] = costs[off + di] + v - prevMin;
-            aggregate[off + di] =
-                Math.min(65535, aggregate[off + di] + Math.round(cur[di]));
-          }
-        }
-        prev.set(cur);
-        vx += dx;
-        y += dy;
-      }
-    }
-    // Four SGM directions. Each path favours piecewise-smooth disparity but
-    // relaxes at image edges.
-    for (let y = 0; y < h; y++) {
-      addPath(0, y, 1, 0);
-      addPath(validW - 1, y, -1, 0);
-    }
-    postProgress(id, .48, 'SGM по горизонтали…');
-    for (let vx = 0; vx < validW; vx++) {
-      addPath(vx, 0, 0, 1);
-      addPath(vx, h - 1, 0, -1);
-    }
-    postProgress(id, .70, 'SGM по вертикали…');
-    let dispIndex = new Int16Array(pixels),
-        reliability = new Float32Array(pixels);
-    for (let y = 0; y < h; y++)
-      for (let vx = 0; vx < validW; vx++) {
-        const pi = y * validW + vx, off = pi * dispCount;
-        let bestD = 0, best = Infinity, second = Infinity;
-        for (let di = 0; di < dispCount; di++) {
-          const v = aggregate[off + di];
-          if (v < best) {
-            best = v;
-            bestD = di;
-          }
-        }
-        for (let di = 0; di < dispCount; di++)
-          if (Math.abs(di - bestD) > 1 && aggregate[off + di] < second)
-            second = aggregate[off + di];
-        dispIndex[pi] = bestD;
-        reliability[pi] =
-            Math.max(0, Math.min(1, (second - best) / Math.max(8, second)));
-      }
-    // Iterated conditional modes: re-check nearby disparities using the
-    // original SGM costs plus support from reliable neighbours. Image edges
-    // weaken support.
-    for (let pass = 0; pass < 3; pass++) {
-      const nextDisp = dispIndex.slice(), nextReliability = reliability.slice();
-      for (let y = 0; y < h; y++)
-        for (let vx = 0; vx < validW; vx++) {
-          const pi = y * validW + vx, center = dispIndex[pi],
-                range = reliability[pi] < .045 ? 3 : 2;
-          let bestD = center, bestEnergy = Infinity, secondEnergy = Infinity;
-          for (let di = Math.max(0, center - range);
-               di <= Math.min(dispCount - 1, center + range); di++) {
-            let energy = aggregate[pi * dispCount + di];
-            for (let k = 0; k < 4; k++) {
-              const nx = vx +
-                  (k === 0     ? -1 :
-                       k === 1 ? 1 :
-                                 0),
-                    ny = y +
-                  (k === 2     ? -1 :
-                       k === 3 ? 1 :
-                                 0);
-              if (nx < 0 || nx >= validW || ny < 0 || ny >= h) continue;
-              const ni = ny * validW + nx, imageA = y * w + xStart + vx,
-                    imageB = ny * w + xStart + nx;
-              const edgeWeight =
-                  Math.exp(-Math.abs(gray[imageA] - gray[imageB]) / 20);
-              const neighbourWeight =
-                  (.15 + reliability[ni] * .85) * edgeWeight;
-              energy += 4.5 * neighbourWeight *
-                  Math.min(4, Math.abs(di - dispIndex[ni]));
-            }
-            if (energy < bestEnergy) {
-              secondEnergy = bestEnergy;
-              bestEnergy = energy;
-              bestD = di;
-            } else if (energy < secondEnergy)
-              secondEnergy = energy;
-          }
-          nextDisp[pi] = bestD;
-          const localConfidence = Math.max(
-              0,
-              Math.min(
-                  1, (secondEnergy - bestEnergy) / Math.max(8, secondEnergy)));
-          nextReliability[pi] = reliability[pi] * .6 + localConfidence * .4;
-        }
-      dispIndex = nextDisp;
-      reliability = nextReliability;
-      postProgress(id, .71 + pass * .025, 'Проверка соседних смещений…');
-    }
-    const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
-    for (let y = 0; y < h; y++)
-      for (let vx = 0; vx < validW; vx++) {
-        const pi = y * validW + vx, i = y * w + xStart + vx;
-        raw[i] = minDisp + dispIndex[pi];
-        conf[i] = reliability[pi];
-      }
-    for (let y = 0; y < h; y++) {
-      const src = y * w + xStart;
-      for (let x = 0; x < xStart; x++) {
-        raw[y * w + x] = raw[src];
-        conf[y * w + x] = conf[src] * .5;
-      }
-      for (let x = xEnd; x < w; x++) {
-        raw[y * w + x] = raw[y * w + xEnd - 1];
-        conf[y * w + x] = conf[y * w + xEnd - 1] * .5;
-      }
-    }
-    let t = raw, c = conf;
-    const vals = new Float32Array(25);
-    for (let pass = 0; pass < 2; pass++) {
-      const out = t.slice(), outC = c.slice();
-      const radius = pass === 0 ? 2 : 1;
-      for (let y = radius; y < h - radius; y++) {
-        for (let x = Math.max(xStart, radius); x < w - radius; x++) {
-          let k = 0;
-          for (let yy = -radius; yy <= radius; yy++)
-            for (let xx = -radius; xx <= radius; xx++)
-              vals[k++] = t[(y + yy) * w + x + xx];
-          sortN(vals, k);
-          const median = vals[k >> 1], i = y * w + x;
-          let weight = 0, sum = 0, support = 0;
-          for (let yy = -radius; yy <= radius; yy++)
-            for (let xx = -radius; xx <= radius; xx++) {
-              const j = (y + yy) * w + x + xx, delta = Math.abs(t[j] - median);
-              if (delta <= 2.25) {
-                const ww = .15 + Math.min(1, c[j] * 5);
-                sum += t[j] * ww;
-                weight += ww;
-                support += Math.min(1, c[j] * 5);
-              }
-            }
-          const consensus = weight > 0 ? sum / weight : median;
-          const ownConfidence = Math.max(0, Math.min(1, c[i] * 4));
-          const blend = .82 - ownConfidence * .62;
-          // Do not smear a strong, well-supported depth edge into its
-          // neighbour.
-          out[i] = ownConfidence > .65 && Math.abs(t[i] - median) > 2.5 ?
-              t[i] :
-              t[i] * (1 - blend) + consensus * blend;
-          outC[i] = Math.min(1, c[i] * .55 + (support / k) * .45);
-        }
-        if ((y & 63) === 0)
-          postProgress(
-              id, .74 + pass * .045 + (y / h) * .04,
-              'Заполнение ненадёжных областей…');
-      }
-      t = out;
-      c = outC;
-    }
-    const samples = [];
-    for (let y = 4; y < h - 4; y += 3)
-      for (let x = 4; x < w - 4; x += 3) samples.push(t[y * w + x]);
-    samples.sort((a, b) => a - b);
-    const lo = percentile(samples, .05), hi = percentile(samples, .95),
-          inv = 1 / Math.max(1e-6, hi - lo);
-    let rawDepth = new Float32Array(w * h), confMap = new Float32Array(w * h);
-    const bins = new Uint32Array(64);
-    for (let i = 0; i < t.length; i++) {
-      const v = Math.max(0, Math.min(1, (t[i] - lo) * inv));
-      rawDepth[i] = v;
-      confMap[i] = Math.max(0, Math.min(1, c[i] * 4));
-      bins[Math.max(0, Math.min(63, (v * 63) | 0))]++;
-    }
-    let bi = 0;
-    for (let i = 1; i < 64; i++)
-      if (bins[i] > bins[bi]) bi = i;
-    const bgDepth = bi / 63, cropX = Math.max(0, Math.min(w - 1, p));
-    rawDepth = robustDepthClean(rawDepth, confMap, w, h, bgDepth, cropX, id);
-    postMessage(
-        {
-          type: 'done',
-          id,
-          bgDepth,
-          cropX,
-          rawDepth: rawDepth.buffer,
-          confMap: confMap.buffer
-        },
-        [rawDepth.buffer, confMap.buffer]);
-  };
-}
-function createDisparityWorker() {
-  const src = '(' + disparityWorkerMain.toString() + ')()';
-  return new Worker(
-      URL.createObjectURL(new Blob([src], {type: 'text/javascript'})));
+function createDepthWorker() {
+  return new Worker(new URL('./depth-worker.js', import.meta.url));
 }
 function currentShape() {
   return +document.querySelector('input[name="shape"]:checked').value;
@@ -437,16 +105,6 @@ function setPair(r, n, v) {
   const x = clampSliderValue(r, v);
   r.value = String(x);
   n.value = formatValue(r, x);
-}
-function smoothstep(a, b, x) {
-  const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a)));
-  return t * t * (3 - 2 * t);
-}
-function percentile(arr, p) {
-  if (!arr.length) return 0;
-  const i =
-      Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * p)));
-  return arr[i];
 }
 function axisValues(start, end, step) {
   const a = [];
@@ -884,129 +542,15 @@ function updateLayerUi() {
 }
 updateLayerUi();
 
-function getScaledPixels(image) {
-  const scale = Math.min(
-      1, ANALYSIS_SIZE / Math.max(image.naturalWidth, image.naturalHeight));
-  const w = Math.max(1, Math.round(image.naturalWidth * scale));
-  const h = Math.max(1, Math.round(image.naturalHeight * scale));
+function getImagePixels(image) {
+  const w = image.naturalWidth;
+  const h = image.naturalHeight;
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   const x = c.getContext('2d', {willReadFrequently: true});
   x.drawImage(image, 0, 0, w, h);
   return {d: x.getImageData(0, 0, w, h).data, w, h};
-}
-function estimatePeriod(gray, w, h) {
-  const a = Math.max(8, Math.floor(w * .02)),
-        b = Math.max(a + 2, Math.min(w - 1, Math.floor(w * .45)));
-  let best = a, bestErr = 1e30;
-  const sy = Math.max(2, Math.floor((h * .6) / 60));
-  for (let p = a; p <= b; p += 2) {
-    let err = 0, n = 0;
-    for (let y = Math.floor(h * .2); y < h * .8; y += sy) {
-      const r = y * w;
-      for (let x = p + 6; x < w - 6; x += 4) {
-        err += Math.abs(gray[r + x] - gray[r + x - p]);
-        n++;
-      }
-    }
-    err /= Math.max(1, n);
-    if (err < bestErr) {
-      bestErr = err;
-      best = p;
-    }
-  }
-  let refined = best;
-  for (let p = Math.max(1, best - 3); p <= Math.min(b, best + 3); p++) {
-    let err = 0, n = 0;
-    for (let y = Math.floor(h * .2); y < h * .8; y += sy) {
-      const r = y * w;
-      for (let x = p + 6; x < w - 6; x += 3) {
-        err += Math.abs(gray[r + x] - gray[r + x - p]);
-        n++;
-      }
-    }
-    err /= Math.max(1, n);
-    if (err < bestErr) {
-      bestErr = err;
-      refined = p;
-    }
-  }
-  // Global correlation is biased toward the average foreground spacing. In an
-  // autostereogram disparity shortens the repeat, so the base/background period
-  // is estimated from the upper robust percentile of local block matches.
-  const localShifts = [], searchLo = Math.max(a, refined - 5),
-        searchHi =
-            Math.min(b, refined + Math.max(10, Math.round(refined * .16)));
-  const gridY = Math.max(7, Math.round(h / 26)),
-        gridX = Math.max(9, Math.round(w / 30));
-  for (let cy = 4; cy < h - 4; cy += gridY)
-    for (let cx = searchHi + 4; cx < w - 4; cx += gridX) {
-      let localBest = refined, localCost = Infinity, localSecond = Infinity;
-      for (let shift = searchLo; shift <= searchHi; shift++) {
-        let cost = 0, count = 0;
-        for (let yy = -3; yy <= 3; yy += 2)
-          for (let xx = -3; xx <= 3; xx++) {
-            const i = (cy + yy) * w + cx + xx, j = i - shift;
-            const lum = Math.min(50, Math.abs(gray[i] - gray[j]));
-            const gradA = gray[i + 1] - gray[i - 1],
-                  gradB = gray[j + 1] - gray[j - 1];
-            cost += lum * .4 + Math.min(60, Math.abs(gradA - gradB)) * .6;
-            count++;
-          }
-        cost /= count;
-        if (cost < localCost) {
-          localSecond = localCost;
-          localCost = cost;
-          localBest = shift;
-        } else if (cost < localSecond)
-          localSecond = cost;
-      }
-      const uniqueness = (localSecond - localCost) / Math.max(1, localSecond);
-      if (uniqueness > .012) localShifts.push(localBest);
-    }
-  if (localShifts.length >= 8) {
-    localShifts.sort((x, y) => x - y);
-    return localShifts[Math.floor((localShifts.length - 1) * .88)];
-  }
-  return refined;
-}
-function gaussianKernel(sigma) {
-  if (sigma < .05) return {radius: 0, kernel: new Float32Array([1])};
-  const radius = Math.min(24, Math.ceil(sigma * 3)),
-        kernel = new Float32Array(radius * 2 + 1);
-  let sum = 0;
-  for (let i = -radius; i <= radius; i++) {
-    const v = Math.exp(-(i * i) / (2 * sigma * sigma));
-    kernel[i + radius] = v;
-    sum += v;
-  }
-  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
-  return {radius, kernel};
-}
-function gaussianBlur(src, w, h, sigma) {
-  const {radius, kernel} = gaussianKernel(sigma);
-  if (radius === 0) return src.slice();
-  const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      let s = 0;
-      for (let k = -radius; k <= radius; k++) {
-        const xx = Math.max(0, Math.min(w - 1, x + k));
-        s += src[y * w + xx] * kernel[k + radius];
-      }
-      tmp[y * w + x] = s;
-    }
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      let s = 0;
-      for (let k = -radius; k <= radius; k++) {
-        const yy = Math.max(0, Math.min(h - 1, y + k));
-        s += tmp[yy * w + x] * kernel[k + radius];
-      }
-      out[y * w + x] = s;
-    }
-  return out;
 }
 function blockMedian(src, w, h, x, y, r) {
   const vals = [];
@@ -1021,6 +565,7 @@ function blockMedian(src, w, h, x, y, r) {
 function updateSourceModeUi() {
   periodR.parentElement.classList.toggle('disabled', loadedDepthMap);
 }
+
 function uploadTextureImage(image) {
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -1099,11 +644,11 @@ function isGrayscaleImage(image) {
 function activateDepthImage(image, url, revokeUrl = false) {
   img = image;
   loadedDepthMap = true;
-  analysisJob++;
   updateSourceModeUi();
-  if (disparityWorker) {
-    disparityWorker.terminate();
-    disparityWorker = null;
+  analysisJob++;
+  if (depthWorker) {
+    depthWorker.terminate();
+    depthWorker = null;
   }
   if (!textureLoaded) uploadTextureImage(image);
   const canvas = document.createElement('canvas');
@@ -1113,18 +658,13 @@ function activateDepthImage(image, url, revokeUrl = false) {
   ctx.drawImage(image, 0, 0);
   const pixels = ctx.getImageData(0, 0, mapW, mapH).data;
   rawDepth = new Float32Array(mapW * mapH);
-  grayMap = new Float32Array(mapW * mapH);
-  confMap = new Float32Array(mapW * mapH);
-  confMap.fill(1);
   for (let i = 0; i < rawDepth.length; i++) {
     const p = i * 4,
           gray = pixels[p] * .299 + pixels[p + 1] * .587 + pixels[p + 2] * .114;
-    grayMap[i] = gray;
     rawDepth[i] = gray / 255;
   }
   processedDepth = rawDepth.slice();
   cropX = 0;
-  bgDepth = 0;
   if (revokeUrl)
     thumb.onload = () => {
       URL.revokeObjectURL(url);
@@ -1170,46 +710,29 @@ async function loadRandomStartupImage() {
 async function analyze() {
   if (!img) return;
   const job = ++analysisJob;
-  if (disparityWorker) {
-    disparityWorker.terminate();
-    disparityWorker = null;
+  if (depthWorker) {
+    depthWorker.terminate();
+    depthWorker = null;
   }
   setProgress(.01, 'Подготовка изображения…');
   await nextFrame();
-  const {d, w, h} = getScaledPixels(img);
+  const {d, w, h} = getImagePixels(img);
   mapW = w;
   mapH = h;
-  const gray = new Float32Array(w * h);
-  const total = w * h;
-  for (let j = 0; j < total; j++) {
-    const i = j * 4;
-    gray[j] = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
-    if ((j & 262143) === 0) {
-      setProgress(.02 + .04 * (j / total), 'Подготовка изображения…');
-      await nextFrame();
-      if (job !== analysisJob) return;
-    }
-  }
-  grayMap = gray;
-  setProgress(.065, 'Определение периода…');
-  await nextFrame();
-  const p = estimatePeriod(gray, w, h);
-  periodR.min = 1;
-  periodR.max = w;
-  setPair(periodR, periodN, p);
-  await recoverDepth(gray, w, h, p, job);
+  rgbaMap = d;
+  await recoverDepth(w, h, 0, job);
 }
 
-function recoverDepth(gray, w, h, p, existingJob = null) {
+function recoverDepth(w, h, manualPeriod = 0, existingJob = null) {
   const job = existingJob ?? ++analysisJob;
-  if (disparityWorker) {
-    disparityWorker.terminate();
-    disparityWorker = null;
+  if (depthWorker) {
+    depthWorker.terminate();
+    depthWorker = null;
   }
-  setProgress(.08, 'Расчёт смещения…');
-  disparityWorker = createDisparityWorker();
+  setProgress(.02, 'Извлечение depth map…');
+  depthWorker = createDepthWorker();
   return new Promise((resolve, reject) => {
-    const worker = disparityWorker;
+    const worker = depthWorker;
     worker.onmessage = e => {
       const m = e.data;
       if (m.id !== job) return;
@@ -1224,13 +747,14 @@ function recoverDepth(gray, w, h, p, existingJob = null) {
           return;
         }
         rawDepth = new Float32Array(m.rawDepth);
-        confMap = new Float32Array(m.confMap);
-        bgDepth = m.bgDepth;
-        cropX = m.cropX;
+        console.info(`Detected stereogram period: ${m.detectedPeriod}px`);
+        periodR.max = String(Math.min(250, w >> 1));
+        periodN.max = periodR.max;
+        setPair(periodR, periodN, m.detectedPeriod);
+        cropX = 0;
         worker.terminate();
-        if (disparityWorker === worker) disparityWorker = null;
+        if (depthWorker === worker) depthWorker = null;
         setProgress(.97, 'Постобработка и построение поверхности…');
-        chooseDefaults();
         reprocess(() => {
           if (job === analysisJob) hideProgress();
           resolve();
@@ -1238,19 +762,16 @@ function recoverDepth(gray, w, h, p, existingJob = null) {
       }
     };
     worker.onerror = err => {
-      if (disparityWorker === worker) disparityWorker = null;
+      if (depthWorker === worker) depthWorker = null;
       worker.terminate();
       hideProgress();
       reject(err);
     };
-    const grayCopy = gray.slice();
+    const rgbaCopy = rgbaMap.slice();
     worker.postMessage(
-        {id: job, grayBuffer: grayCopy.buffer, w, h, p}, [grayCopy.buffer]);
+        {id: job, rgbaBuffer: rgbaCopy.buffer, w, h, period: manualPeriod},
+        [rgbaCopy.buffer]);
   });
-}
-
-function chooseDefaults() {
-  // Preserve the user's Convex/Concave selection. HTML default is Convex.
 }
 
 function reprocess(onDone = null) {
@@ -1260,9 +781,7 @@ function reprocess(onDone = null) {
       if (onDone) onDone();
       return;
     }
-    const sigma = ANALYSIS_SIGMA;
-    processedDepth = loadedDepthMap ? rawDepth.slice() :
-                                      gaussianBlur(rawDepth, mapW, mapH, sigma);
+    processedDepth = rawDepth.slice();
     rebuildDepthPreview();
     buildMesh();
     sched();
@@ -1435,315 +954,25 @@ function buildMesh() {
       gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, q), gl.STATIC_DRAW);
 }
 
-function morphMask(mask, w, h, r, dilate) {
-  if (r <= 0) return mask.slice();
-  const tmp = new Uint8Array(mask.length), out = new Uint8Array(mask.length);
-  const rowPrefix = new Int32Array(w + 1), colPrefix = new Int32Array(h + 1);
-  for (let y = 0; y < h; y++) {
-    rowPrefix.fill(0);
-    const row = y * w;
-    for (let x = cropX; x < w; x++)
-      rowPrefix[x + 1] = rowPrefix[x] + mask[row + x];
-    for (let x = cropX; x < w; x++) {
-      const x0 = Math.max(cropX, x - r), x1 = Math.min(w - 1, x + r),
-            sum = rowPrefix[x1 + 1] - rowPrefix[x0];
-      tmp[row + x] = dilate ? (sum > 0 ? 1 : 0) : (sum === x1 - x0 + 1 ? 1 : 0);
-    }
-  }
-  for (let x = cropX; x < w; x++) {
-    colPrefix[0] = 0;
-    for (let y = 0; y < h; y++)
-      colPrefix[y + 1] = colPrefix[y] + tmp[y * w + x];
-    for (let y = 0; y < h; y++) {
-      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r),
-            sum = colPrefix[y1 + 1] - colPrefix[y0];
-      out[y * w + x] =
-          dilate ? (sum > 0 ? 1 : 0) : (sum === y1 - y0 + 1 ? 1 : 0);
-    }
-  }
-  return out;
-}
-function dilateMask(mask, w, h, r = 1) {
-  return morphMask(mask, w, h, r, true);
-}
-function erodeMask(mask, w, h, r = 1) {
-  return morphMask(mask, w, h, r, false);
-}
-function removeSmallComponents(mask, w, h, minSize) {
-  if (minSize <= 1) return mask.slice();
-  const out = mask.slice(), seen = new Uint8Array(mask.length),
-        queue = new Int32Array(mask.length);
-  for (let y = 0; y < h; y++)
-    for (let x = cropX; x < w; x++) {
-      const start = y * w + x;
-      if (!out[start] || seen[start]) continue;
-      let head = 0, tail = 0;
-      queue[tail++] = start;
-      seen[start] = 1;
-      while (head < tail) {
-        const v = queue[head++], vx = v % w, vy = (v / w) | 0;
-        for (let yy = Math.max(0, vy - 1); yy <= Math.min(h - 1, vy + 1); yy++)
-          for (let xx = Math.max(cropX, vx - 1); xx <= Math.min(w - 1, vx + 1);
-               xx++) {
-            const n = yy * w + xx;
-            if (out[n] && !seen[n]) {
-              seen[n] = 1;
-              queue[tail++] = n;
-            }
-          }
-      }
-      if (tail < minSize)
-        for (let i = 0; i < tail; i++) out[queue[i]] = 0;
-    }
-  return out;
-}
-function suppressDepthSpikes(src, surfaceMask, w, h, maxSize) {
-  if (maxSize < 1) return src.slice();
-  const medianMap = new Float32Array(src.length),
-        spikeMask = new Uint8Array(src.length);
-  const values = new Float32Array(9), deviations = new Float32Array(9);
-  for (let y = 1; y < h - 1; y++)
-    for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
-      const i = y * w + x;
-      if (!surfaceMask[i]) continue;
-      let n = 0;
-      for (let yy = -1; yy <= 1; yy++)
-        for (let xx = -1; xx <= 1; xx++) {
-          const j = (y + yy) * w + x + xx;
-          if (surfaceMask[j]) values[n++] = src[j];
-        }
-      if (n < 4) continue;
-      for (let a = 1; a < n; a++) {
-        const v = values[a];
-        let b = a - 1;
-        while (b >= 0 && values[b] > v) {
-          values[b + 1] = values[b];
-          b--;
-        }
-        values[b + 1] = v;
-      }
-      const median = values[n >> 1];
-      medianMap[i] = median;
-      for (let a = 0; a < n; a++) deviations[a] = Math.abs(values[a] - median);
-      for (let a = 1; a < n; a++) {
-        const v = deviations[a];
-        let b = a - 1;
-        while (b >= 0 && deviations[b] > v) {
-          deviations[b + 1] = deviations[b];
-          b--;
-        }
-        deviations[b + 1] = v;
-      }
-      const mad = deviations[n >> 1], threshold = .010 + mad * 3.2;
-      if (Math.abs(src[i] - median) > threshold) spikeMask[i] = 1;
-    }
-  const out = src.slice(), seen = new Uint8Array(src.length),
-        queue = new Int32Array(src.length);
-  for (let y = 1; y < h - 1; y++)
-    for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
-      const start = y * w + x;
-      if (!spikeMask[start] || seen[start]) continue;
-      let head = 0, tail = 0;
-      queue[tail++] = start;
-      seen[start] = 1;
-      while (head < tail) {
-        const v = queue[head++], vx = v % w, vy = (v / w) | 0;
-        for (let yy = Math.max(1, vy - 1); yy <= Math.min(h - 2, vy + 1); yy++)
-          for (let xx = Math.max(cropX + 1, vx - 1);
-               xx <= Math.min(w - 2, vx + 1); xx++) {
-            const j = yy * w + xx;
-            if (spikeMask[j] && !seen[j]) {
-              seen[j] = 1;
-              queue[tail++] = j;
-            }
-          }
-      }
-      if (tail <= maxSize)
-        for (let k = 0; k < tail; k++) out[queue[k]] = medianMap[queue[k]];
-    }
-  return out;
-}
-function smoothDepthBoundary(src, surfaceMask, w, h, radius = 10) {
-  const inner = erodeMask(surfaceMask, w, h, radius);
-  const weights = new Float32Array(surfaceMask.length);
-  for (let i = 0; i < weights.length; i++) weights[i] = surfaceMask[i] ? 1 : 0;
-  // Normalized convolution averages only other surface pixels, never the black
-  // background.
-  const interpolated =
-      weightedGaussian(src, weights, w, h, Math.max(1, radius * .55));
-  const out = src.slice();
-  for (let i = 0; i < out.length; i++)
-    if (surfaceMask[i] && !inner[i] && interpolated[i] > 0)
-      out[i] = interpolated[i];
-  return out;
-}
-function weightedGaussian(values, weights, w, h, sigma) {
-  const num = new Float32Array(values.length);
-  for (let i = 0; i < values.length; i++) num[i] = values[i] * weights[i];
-  const bNum = gaussianBlur(num, w, h, sigma),
-        bDen = gaussianBlur(weights, w, h, sigma),
-        out = new Float32Array(values.length);
-  for (let i = 0; i < out.length; i++)
-    out[i] = bDen[i] > .0001 ? bNum[i] / bDen[i] : 0;
-  return out;
-}
-function swapWeighted(values, weights, a, b) {
-  const v = values[a], ww = weights[a];
-  values[a] = values[b];
-  weights[a] = weights[b];
-  values[b] = v;
-  weights[b] = ww;
-}
-function selectWeightedMedian(values, weights, n, targetWeight) {
-  let left = 0, right = n - 1, target = targetWeight;
-  while (left <= right) {
-    const pivot = values[(left + right) >> 1];
-    let lt = left, i = left, gt = right;
-    while (i <= gt) {
-      if (values[i] < pivot) {
-        swapWeighted(values, weights, i, lt);
-        i++;
-        lt++;
-      } else if (values[i] > pivot) {
-        swapWeighted(values, weights, i, gt);
-        gt--;
-      } else
-        i++;
-    }
-    let lowerWeight = 0, equalWeight = 0;
-    for (i = left; i < lt; i++) lowerWeight += weights[i];
-    for (i = lt; i <= gt; i++) equalWeight += weights[i];
-    if (target <= lowerWeight)
-      right = lt - 1;
-    else if (target <= lowerWeight + equalWeight)
-      return pivot;
-    else {
-      target -= lowerWeight + equalWeight;
-      left = gt + 1;
-    }
-  }
-  return values[Math.max(0, Math.min(n - 1, left))];
-}
-function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
-  const out = src.slice(), sampleStep = Math.max(1, Math.ceil(radius / 3));
-  const samplesPerAxis = Math.floor(radius * 2 / sampleStep) + 1,
-        maxN = samplesPerAxis ** 2;
-  const values = new Float32Array(maxN), weights = new Float32Array(maxN);
-  const guideScale = 20;
-  for (let y = radius; y < h - radius; y++)
-    for (let x = Math.max(cropX + radius, radius); x < w - radius; x++) {
-      const i = y * w + x;
-      if (!mask[i]) continue;
-      let n = 0, totalWeight = 0;
-      for (let yy = -radius; yy <= radius; yy += sampleStep)
-        for (let xx = -radius; xx <= radius; xx += sampleStep) {
-          const j = (y + yy) * w + x + xx;
-          if (!mask[j] || src[j] <= 0) continue;
-          const spatial = 1 / (1 + xx * xx + yy * yy);
-          const edge =
-              guide ? Math.exp(-Math.abs(guide[j] - guide[i]) / guideScale) : 1;
-          values[n] = src[j];
-          weights[n] =
-              spatial * edge * (.15 + (confidence ? confidence[j] : 1));
-          totalWeight += weights[n];
-          n++;
-        }
-      if (n)
-        out[i] = selectWeightedMedian(values, weights, n, totalWeight * .5);
-    }
-  return out;
-}
 function rebuildDepthPreview() {
   depthPreview = null;
   depthPreviewW = 0;
   depthPreviewH = 0;
   cleanDepthMap = null;
-  if (!processedDepth || !grayMap || !mapW || !mapH) return;
+  if (!processedDepth || !mapW || !mapH) return;
 
-  const w = mapW, h = mapH, shape = currentShape();
-  if (loadedDepthMap) {
-    cleanDepthMap = processedDepth.slice();
-    depthPreviewW = w;
-    depthPreviewH = h;
-    const imgData = depthCtx.createImageData(w, h);
-    for (let i = 0, o = 0; i < cleanDepthMap.length; i++) {
-      const g = Math.max(0, Math.min(255, Math.round(cleanDepthMap[i] * 255)));
-      imgData.data[o++] = g;
-      imgData.data[o++] = g;
-      imgData.data[o++] = g;
-      imgData.data[o++] = 255;
-    }
-    depthPreview = imgData;
-    return;
+  cleanDepthMap = processedDepth.slice();
+  depthPreviewW = mapW;
+  depthPreviewH = mapH;
+  const imageData = depthCtx.createImageData(mapW, mapH);
+  for (let i = 0, offset = 0; i < cleanDepthMap.length; i++) {
+    const gray = Math.max(0, Math.min(255, Math.round(cleanDepthMap[i] * 255)));
+    imageData.data[offset++] = gray;
+    imageData.data[offset++] = gray;
+    imageData.data[offset++] = gray;
+    imageData.data[offset++] = 255;
   }
-  const signed = new Float32Array(w * h), positives = [];
-  for (let y = 0; y < h; y++)
-    for (let x = cropX; x < w; x++) {
-      const i = y * w + x;
-      const s = Math.max(0, processedDepth[i] - bgDepth);
-      signed[i] = s;
-      if ((x & 1) === 0 && (y & 1) === 0 && s > 0) positives.push(s);
-    }
-  positives.sort((a, b) => a - b);
-  const depthNoiseFloor = positives.length ?
-      Math.max(.004, percentile(positives, .10) * .65) :
-      .008;
-  let mask = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++)
-    for (let x = cropX; x < w; x++) {
-      const i = y * w + x;
-      mask[i] = signed[i] > depthNoiseFloor ? 1 : 0;
-    }
-  mask = removeSmallComponents(mask, w, h, SPECKLE_SIZE);
-
-  let clean = new Float32Array(w * h);
-  for (let i = 0; i < clean.length; i++)
-    if (mask[i]) clean[i] = signed[i];
-  {
-    const radius = FILL_RADIUS;
-    const closed = erodeMask(dilateMask(mask, w, h, radius), w, h, radius);
-    const weights = new Float32Array(mask.length);
-    for (let i = 0; i < weights.length; i++)
-      weights[i] = mask[i] ? (.1 + (confMap ? confMap[i] : 1)) : 0;
-    const filled = weightedGaussian(signed, weights, w, h, Math.max(1, radius));
-    for (let i = 0; i < clean.length; i++)
-      if (closed[i]) {
-        if (!mask[i]) clean[i] = filled[i];
-        mask[i] = 1;
-      }
-  }
-  clean = suppressDepthSpikes(clean, mask, w, h, SPECKLE_SIZE);
-  clean = smoothDepthBoundary(clean, mask, w, h, 10);
-  clean = weightedMedianDepth(clean, mask, confMap, null, w, h, MEDIAN_RADIUS);
-
-  const nz = [];
-  for (let y = 0; y < h; y += 2)
-    for (let x = cropX; x < w; x += 2) {
-      const v = clean[y * w + x];
-      if (v > .0005) nz.push(v);
-    }
-  nz.sort((a, b) => a - b);
-  const hi = nz.length ? Math.max(.02, percentile(nz, .985)) : 1,
-        inv = 1 / Math.max(1e-6, hi);
-  cleanDepthMap = new Float32Array(w * h);
-  const srcW = Math.max(1, w - cropX), srcH = h;
-  const imgData = depthCtx.createImageData(srcW, srcH);
-  let o = 0;
-  for (let y = 0; y < h; y++)
-    for (let x = cropX; x < w; x++) {
-      const lin = Math.max(0, Math.min(1, clean[y * w + x] * inv));
-      cleanDepthMap[y * w + x] = lin;
-      const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
-      const t = Math.pow(shown, .82);
-      const g = Math.max(0, Math.min(255, Math.round(t * 255)));
-      imgData.data[o++] = g;
-      imgData.data[o++] = g;
-      imgData.data[o++] = g;
-      imgData.data[o++] = 255;
-    }
-  depthPreview = imgData;
-  depthPreviewW = srcW;
-  depthPreviewH = srcH;
+  depthPreview = imageData;
 }
 function renderDepthMap() {
   if (!depthPreview || !depthPreviewW || !depthPreviewH) {
@@ -1858,8 +1087,8 @@ addEventListener('drop', e => {
     loadImage(f);
 });
 periodR.onchange = () => {
-  if (loadedDepthMap || !grayMap || !mapW || !mapH) return;
-  recoverDepth(grayMap, mapW, mapH, +periodR.value).catch(err => {
+  if (loadedDepthMap || !rgbaMap || !mapW || !mapH) return;
+  recoverDepth(mapW, mapH, +periodR.value).catch(err => {
     console.error(err);
     hideProgress();
   });

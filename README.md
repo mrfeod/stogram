@@ -48,7 +48,7 @@ A depth map replaces the geometry while preserving the current texture. If there
 | --- | --- |
 | `↕︎` | Depth scale |
 | `≡` | Number of layers |
-| `↔` | Stereogram period |
+| `↔` | Detected stereogram period; adjust manually if needed |
 
 ## Controls
 
@@ -62,18 +62,20 @@ A depth map replaces the geometry while preserving the current texture. If there
 
 ```text
 Stereogram
-    ↓ resize to 512 px + grayscale
-Global period search
-    ↓ refinement using local blocks
-5×5 Census
-    ↓ cost volume for possible disparities
-Four-direction SGM
-    ↓ best disparity selection + confidence
-3 local ICM refinement passes
-    ↓ normalization and background detection
-Island and MAD spike removal
-    ↓ hole filling and contour smoothing
-Weighted median
+    ↓ original resolution
+Global grayscale period search
+    ↓ robust upper percentile of unique local repeats
+    ↓ candidate periods: background − 30 … background + 5
+9×9 local grayscale matching cost
+    ↓ subpixel minimum-cost period per pixel
+Confidence from the two best matches
+    ↓ ambiguous pixels refined from texture-consistent neighbours
+3×3 median filter
+    ↓ background-period subtraction
+Largest foreground component
+    ↓ mask-aware Gaussian smoothing
+Small-hole filling + MAD spike suppression
+    ↓ texture-guided weighted median
     ↓
 Ready depth map
     ↓
