@@ -76,6 +76,7 @@ Island and MAD spike removal
 Weighted median
     ↓ mask-aware Gaussian smoothing
 Soft contour coverage (antialiasing)
+    ↓ robust 1–99% depth normalization
     ↓
 Ready depth map
     ↓

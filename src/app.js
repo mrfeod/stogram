@@ -30,7 +30,7 @@ let img = null, loadedDepthMap = false, textureLoaded = false;
 let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, depthPreview = null, depthPreviewW = 0,
-    depthPreviewH = 0;
+    depthPreviewH = 0, depthCoverage = null;
 let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0,
     pinch = 0;
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
@@ -1626,14 +1626,20 @@ function smoothInsideMask(depth, mask, w, h, sigma = 4, finalSigma = 1.5) {
   const smoothed = finalSigma > 0 ?
       gaussianBlur(normalized, w, h, finalSigma) : normalized;
   const coverage = gaussianBlur(weights, w, h, 1.25);
+  const effectiveCoverage = new Float32Array(coverage.length);
   for (let i = 0; i < smoothed.length; i++) {
     // A soft coverage mask behaves like contour antialiasing: the geometry
     // reaches the background over a couple of pixels instead of ending on a
     // staircase-shaped binary edge.
     const alpha = coverage[i] <= .01 ? 0 : smoothstep(.02, .98, coverage[i]);
+    effectiveCoverage[i] = alpha;
     smoothed[i] *= alpha;
     mask[i] = closedMask[i];
   }
+  // Keep exactly the same alpha for normalization and compositing. Dividing
+  // by the raw Gaussian coverage after multiplying by smoothstep(coverage)
+  // artificially amplified the contour and produced a bright halo.
+  depthCoverage = effectiveCoverage;
   return smoothed;
 }
 function swapWeighted(values, weights, a, b) {
@@ -1707,6 +1713,7 @@ function rebuildDepthPreview() {
   depthPreviewW = 0;
   depthPreviewH = 0;
   cleanDepthMap = null;
+  depthCoverage = null;
   if (!processedDepth || !grayMap || !mapW || !mapH) return;
 
   const w = mapW, h = mapH, shape = currentShape();
@@ -1769,19 +1776,29 @@ function rebuildDepthPreview() {
   const nz = [];
   for (let y = 0; y < h; y += 2)
     for (let x = cropX; x < w; x += 2) {
-      const v = clean[y * w + x];
-      if (v > .0005) nz.push(v);
+      const i = y * w + x;
+      const alpha = depthCoverage ? depthCoverage[i] : 1;
+      const v = alpha > .01 ? clean[i] / alpha : clean[i];
+      if (mask[i] && v > .0005) nz.push(v);
     }
   nz.sort((a, b) => a - b);
-  const hi = nz.length ? Math.max(.02, percentile(nz, .985)) : 1,
-        inv = 1 / Math.max(1e-6, hi);
+  // Robust global autocontrast. A stronger 1% black cutoff removes the long
+  // low-depth tail; the upper end remains conservative to preserve highlights.
+  const lo = nz.length ? percentile(nz, .01) : 0;
+  const hi = nz.length ? Math.max(lo + .02, percentile(nz, .99)) : 1;
+  const inv = 1 / Math.max(1e-6, hi - lo);
   cleanDepthMap = new Float32Array(w * h);
   const srcW = Math.max(1, w - cropX), srcH = h;
   const imgData = depthCtx.createImageData(srcW, srcH);
   let o = 0;
   for (let y = 0; y < h; y++)
     for (let x = cropX; x < w; x++) {
-      const lin = Math.max(0, Math.min(1, clean[y * w + x] * inv));
+      const i = y * w + x, value = clean[i];
+      const alpha = depthCoverage ? depthCoverage[i] : 1;
+      const base = alpha > .01 ? value / alpha : value;
+      const stretched =
+          base > 0 ? Math.max(0, Math.min(1, (base - lo) * inv)) : 0;
+      const lin = stretched * alpha;
       cleanDepthMap[y * w + x] = lin;
       const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
       const t = Math.pow(shown, .82);
