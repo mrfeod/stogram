@@ -2,7 +2,7 @@
 
 <p align="center"><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="128"></p>
 
-An autostereogram and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
+An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
 
 <div align="center" style="display: flex; align-items: center; gap: 10px;">
   <img src="src/images/camel.jpg" alt="Camel stereogram" style="max-height: 512px; max-width: 31%;">
