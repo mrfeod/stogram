@@ -1497,6 +1497,34 @@ function removeSmallComponents(mask, w, h, minSize) {
     }
   return out;
 }
+function fillSmallMaskHoles(mask, w, h, maxSize) {
+  const out = mask.slice(), seen = new Uint8Array(mask.length),
+        queue = new Int32Array(mask.length);
+  for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+    const start = y * w + x;
+    if (out[start] || seen[start]) continue;
+    let head = 0, tail = 0, touchesOutside = false;
+    queue[tail++] = start;
+    seen[start] = 1;
+    while (head < tail) {
+      const index = queue[head++], px = index % w, py = (index / w) | 0;
+      if (px === cropX || px === w - 1 || py === 0 || py === h - 1)
+        touchesOutside = true;
+      for (let yy = Math.max(0, py - 1); yy <= Math.min(h - 1, py + 1); yy++) {
+        for (let xx = Math.max(cropX, px - 1); xx <= Math.min(w - 1, px + 1); xx++) {
+          const neighbour = yy * w + xx;
+          if (!out[neighbour] && !seen[neighbour]) {
+            seen[neighbour] = 1;
+            queue[tail++] = neighbour;
+          }
+        }
+      }
+    }
+    if (!touchesOutside && tail <= maxSize)
+      for (let i = 0; i < tail; i++) out[queue[i]] = 1;
+  }
+  return out;
+}
 function suppressDepthSpikes(src, surfaceMask, w, h, maxSize) {
   if (maxSize < 1) return src.slice();
   const medianMap = new Float32Array(src.length),
@@ -1588,7 +1616,7 @@ function weightedGaussian(values, weights, w, h, sigma) {
   return out;
 }
 function smoothInsideMask(depth, mask, w, h, sigma = 4, finalSigma = 1.5) {
-  const closedMask = erodeMask(dilateMask(mask, w, h, 2), w, h, 2);
+  const closedMask = mask.slice();
   const weights = new Float32Array(mask.length);
   for (let i = 0; i < weights.length; i++) weights[i] = closedMask[i];
 
@@ -1722,7 +1750,7 @@ function rebuildDepthPreview() {
     if (mask[i]) clean[i] = signed[i];
   {
     const radius = FILL_RADIUS;
-    const closed = erodeMask(dilateMask(mask, w, h, radius), w, h, radius);
+    const closed = fillSmallMaskHoles(mask, w, h, radius * radius * 8);
     const weights = new Float32Array(mask.length);
     for (let i = 0; i < weights.length; i++)
       weights[i] = mask[i] ? (.1 + (confMap ? confMap[i] : 1)) : 0;
