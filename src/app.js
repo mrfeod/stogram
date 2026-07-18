@@ -79,7 +79,10 @@ import { G_VERTEX_SHADER, G_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER, SHADOW_FRAGME
         const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
         const minDisp = -Math.max(2, Math.floor(p * .08));
         const dispCount = maxDisp - minDisp + 1;
-        const xStart = p + maxDisp + 3, xEnd = w - 3, validW = Math.max(1, xEnd - xStart);
+        // A single-image stereogram has no unique depth in its first repeat.
+        // Start matching at the first position where every disparity candidate
+        // has a valid previous repeat, but crop the result by exactly one period.
+        const xStart = p - minDisp + 2, xEnd = w - 3, validW = Math.max(1, xEnd - xStart);
         const pixels = validW * h, census = new Uint32Array(w * h);
         // 5x5 Census descriptor: local ordering is much less sensitive to the source texture brightness.
         for (let y = 2; y < h - 2; y++) for (let x = 2; x < w - 2; x++) {
@@ -221,7 +224,7 @@ import { G_VERTEX_SHADER, G_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER, SHADOW_FRAGME
           const v = Math.max(0, Math.min(1, (t[i] - lo) * inv)); rawDepth[i] = v; confMap[i] = Math.max(0, Math.min(1, c[i] * 4)); bins[Math.max(0, Math.min(63, (v * 63) | 0))]++;
         }
         let bi = 0; for (let i = 1; i < 64; i++)if (bins[i] > bins[bi]) bi = i;
-        const bgDepth = bi / 63, cropX = Math.max(0, Math.min(w - 1, xStart));
+        const bgDepth = bi / 63, cropX = Math.max(0, Math.min(w - 1, p));
         rawDepth = robustDepthClean(rawDepth, confMap, w, h, bgDepth, cropX, id);
         postMessage({ type: 'done', id, bgDepth, cropX, rawDepth: rawDepth.buffer, confMap: confMap.buffer }, [rawDepth.buffer, confMap.buffer]);
       };
