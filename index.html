@@ -242,6 +242,27 @@
       pointer-events: none
     }
 
+    #settingsPanel {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 8;
+      width: min(390px, calc(100% - 24px));
+      max-height: calc(100% - 24px);
+      overflow: auto;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(26, 29, 36, .97);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, .4)
+    }
+
+    #settingsPanel[hidden] { display: none }
+    .setting { display: grid; grid-template-columns: 22px 1fr 48px; gap: 7px; align-items: center; margin: 8px 0 }
+    .setting input[type=range] { width: 100% }
+    .setting output { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums }
+    .settingsTitle { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px }
+
     @media(max-width:860px) {
       header {
         gap: 6px;
@@ -277,6 +298,7 @@
       <button id="analyze">↻</button>
       <button id="reset">⊕</button>
       <button id="auto">▶</button>
+      <button id="settingsBtn" class="fixed-hidden" title="Настройки обработки depth map">⚙</button>
 
       <div class="seg">
         <label><input type="radio" name="shape" value="1" checked><span>◠</span></label>
@@ -307,6 +329,15 @@
           value="60"><input id="meshSmoothNum" class="num" type="number" step="1" value="60"></label>
     </header>
     <main>
+      <aside id="settingsPanel" hidden>
+        <div class="settingsTitle"><strong>Обработка depth map</strong><button id="settingsClose">×</button></div>
+        <label class="setting"><input id="pipeSpeckles" type="checkbox" checked><span>Удаление островков</span><output></output></label>
+        <label class="setting"><span></span><input id="speckleSize" type="range" min="0" max="1000" step="5" value="200"><output></output></label>
+        <label class="setting"><input id="pipeFill" type="checkbox" checked><span>Заполнение дыр</span><output></output></label>
+        <label class="setting"><span></span><input id="fillRadius" type="range" min="1" max="12" step="1" value="8"><output></output></label>
+        <label class="setting"><input id="pipeMedian" type="checkbox" checked><span>Weighted median</span><output></output></label>
+        <label class="setting"><span></span><input id="medianRadius" type="range" min="1" max="12" step="1" value="8"><output></output></label>
+      </aside>
       <canvas id="view"></canvas>
       <canvas id="depthView"></canvas>
       <div id="progressOverlay" hidden>
@@ -331,6 +362,7 @@
     const periodR = $('#period'), periodN = $('#periodNum');
     const meshSmoothR = $('#meshSmooth'), meshSmoothN = $('#meshSmoothNum');
     const autoBtn = $('#auto');
+    const pipelineIds = ['speckleSize', 'fillRadius', 'medianRadius'];
     const gl = cv.getContext('webgl2', { alpha: false, antialias: true, powerPreference: 'high-performance' });
     if (!gl) { alert('Нужен WebGL2'); throw new Error('WebGL2 unavailable'); }
 
@@ -895,9 +927,8 @@ void main(){
 
     function getScaledPixels(image) {
       // SGM keeps a disparity cost volume; cap analysis size to keep memory predictable.
-      const maxSide = 900, scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
-      const w = Math.max(1, Math.round(image.naturalWidth * scale));
-      const h = Math.max(1, Math.round(image.naturalHeight * scale));
+      const w = Math.max(1, image.naturalWidth);
+      const h = Math.max(1, image.naturalHeight);
       const c = document.createElement('canvas'); c.width = w; c.height = h;
       const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(image, 0, 0, w, h);
       return { d: x.getImageData(0, 0, w, h).data, w, h };
@@ -1296,6 +1327,52 @@ void main(){
       }
       return out;
     }
+    function suppressDepthSpikes(src, surfaceMask, w, h, maxSize) {
+      if (maxSize < 1) return src.slice();
+      const medianMap = new Float32Array(src.length), spikeMask = new Uint8Array(src.length);
+      const values = new Float32Array(9), deviations = new Float32Array(9);
+      for (let y = 1; y < h - 1; y++) for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
+        const i = y * w + x; if (!surfaceMask[i]) continue;
+        let n = 0;
+        for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+          const j = (y + yy) * w + x + xx;
+          if (surfaceMask[j]) values[n++] = src[j];
+        }
+        if (n < 4) continue;
+        for (let a = 1; a < n; a++) { const v = values[a]; let b = a - 1; while (b >= 0 && values[b] > v) { values[b + 1] = values[b]; b--; } values[b + 1] = v; }
+        const median = values[n >> 1]; medianMap[i] = median;
+        for (let a = 0; a < n; a++) deviations[a] = Math.abs(values[a] - median);
+        for (let a = 1; a < n; a++) { const v = deviations[a]; let b = a - 1; while (b >= 0 && deviations[b] > v) { deviations[b + 1] = deviations[b]; b--; } deviations[b + 1] = v; }
+        const mad = deviations[n >> 1], threshold = .010 + mad * 3.2;
+        if (Math.abs(src[i] - median) > threshold) spikeMask[i] = 1;
+      }
+      const out = src.slice(), seen = new Uint8Array(src.length), queue = new Int32Array(src.length);
+      for (let y = 1; y < h - 1; y++) for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
+        const start = y * w + x; if (!spikeMask[start] || seen[start]) continue;
+        let head = 0, tail = 0; queue[tail++] = start; seen[start] = 1;
+        while (head < tail) {
+          const v = queue[head++], vx = v % w, vy = (v / w) | 0;
+          for (let yy = Math.max(1, vy - 1); yy <= Math.min(h - 2, vy + 1); yy++) for (let xx = Math.max(cropX + 1, vx - 1); xx <= Math.min(w - 2, vx + 1); xx++) {
+            const j = yy * w + xx;
+            if (spikeMask[j] && !seen[j]) { seen[j] = 1; queue[tail++] = j; }
+          }
+        }
+        if (tail <= maxSize) for (let k = 0; k < tail; k++) out[queue[k]] = medianMap[queue[k]];
+      }
+      return out;
+    }
+    function smoothDepthBoundary(src, surfaceMask, w, h, radius = 10) {
+      // Build an inner mask one pixel at a time; the removed ring is the contour band.
+      let inner = surfaceMask.slice();
+      for (let pass = 0; pass < radius; pass++) inner = erodeMask(inner, w, h, 1);
+      const weights = new Float32Array(surfaceMask.length);
+      for (let i = 0; i < weights.length; i++) weights[i] = surfaceMask[i] ? 1 : 0;
+      // Normalized convolution averages only other surface pixels, never the black background.
+      const interpolated = weightedGaussian(src, weights, w, h, Math.max(1, radius * .55));
+      const out = src.slice();
+      for (let i = 0; i < out.length; i++) if (surfaceMask[i] && !inner[i] && interpolated[i] > 0) out[i] = interpolated[i];
+      return out;
+    }
     function weightedGaussian(values, weights, w, h, sigma) {
       const num = new Float32Array(values.length);
       for (let i = 0; i < values.length; i++)num[i] = values[i] * weights[i];
@@ -1303,15 +1380,35 @@ void main(){
       for (let i = 0; i < out.length; i++)out[i] = bDen[i] > .0001 ? bNum[i] / bDen[i] : 0;
       return out;
     }
+    function pipelineValue(id) { return +$('#' + id).value || 0; }
+    function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
+      const out = src.slice(), sampleStep = Math.max(1, Math.ceil(radius / 3));
+      const samplesPerAxis = Math.floor(radius * 2 / sampleStep) + 1, maxN = samplesPerAxis ** 2;
+      const values = new Float32Array(maxN), weights = new Float32Array(maxN);
+      const guideScale = 20;
+      for (let y = radius; y < h - radius; y++) for (let x = Math.max(cropX + radius, radius); x < w - radius; x++) {
+        const i = y * w + x; if (!mask[i]) continue;
+        let n = 0, totalWeight = 0;
+        for (let yy = -radius; yy <= radius; yy += sampleStep) for (let xx = -radius; xx <= radius; xx += sampleStep) {
+          const j = (y + yy) * w + x + xx; if (!mask[j] || src[j] <= 0) continue;
+          const spatial = 1 / (1 + xx * xx + yy * yy);
+          const edge = guide ? Math.exp(-Math.abs(guide[j] - guide[i]) / guideScale) : 1;
+          values[n] = src[j]; weights[n] = spatial * edge * (.15 + (confidence ? confidence[j] : 1)); totalWeight += weights[n]; n++;
+        }
+        for (let a = 1; a < n; a++) {
+          const v = values[a], ww = weights[a]; let b = a - 1;
+          while (b >= 0 && values[b] > v) { values[b + 1] = values[b]; weights[b + 1] = weights[b]; b--; }
+          values[b + 1] = v; weights[b + 1] = ww;
+        }
+        let sum = 0; for (let a = 0; a < n; a++) { sum += weights[a]; if (sum >= totalWeight * .5) { out[i] = values[a]; break; } }
+      }
+      return out;
+    }
     function rebuildDepthPreview() {
       depthPreview = null; depthPreviewW = 0; depthPreviewH = 0; cleanDepthMap = null;
       if (!processedDepth || !grayMap || !mapW || !mapH) return;
 
       const w = mapW, h = mapH, shape = currentShape();
-      const textureStrength = Math.max(0, Math.min(1, (+textureR.value || 0) / 100));
-      const minBlob = Math.max(0, Math.round((+blobR.value || 0) / 100 * Math.max(1, (w - cropX) * h)));
-
-      // 1) Signed disparity on the currently selected side.
       const signed = new Float32Array(w * h), positives = [];
       for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
         const i = y * w + x;
@@ -1321,53 +1418,27 @@ void main(){
       }
       positives.sort((a, b) => a - b);
       const depthNoiseFloor = positives.length ? Math.max(.004, percentile(positives, .10) * .65) : .008;
-
-      // 2) Estimate high-frequency source texture: repeating stereogram texture should reduce confidence.
-      const graySmooth = gaussianBlur(grayMap, w, h, 1.35);
-      const texture = new Float32Array(w * h), texSamples = [];
-      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
-        const i = y * w + x, v = Math.abs(grayMap[i] - graySmooth[i]);
-        texture[i] = v;
-        if ((x & 3) === 0 && (y & 3) === 0) texSamples.push(v);
-      }
-      texSamples.sort((a, b) => a - b);
-      const texLo = percentile(texSamples, .30), texHi = Math.max(texLo + 1e-6, percentile(texSamples, .97));
-      const texInv = 1 / (texHi - texLo);
-
-      // 3) Combine confidence, local coherence and texture penalty.
-      const localDepth = gaussianBlur(signed, w, h, 2.0);
-      let score = new Float32Array(w * h), active = [];
-      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
-        const i = y * w + x, s = signed[i];
-        const cf = confMap ? Math.max(0, Math.min(1, confMap[i])) : 1;
-        const confWeight = smoothstep(.015, .12, cf);
-        const disagreement = Math.abs(s - localDepth[i]);
-        const coherence = 1 - smoothstep(.012, .075, disagreement);
-        const tex = Math.max(0, Math.min(1, (texture[i] - texLo) * texInv));
-        const texturePenalty = textureStrength * tex * (.20 + .80 * (1 - confWeight * coherence));
-        const depthGate = smoothstep(depthNoiseFloor, depthNoiseFloor * 3.0, s);
-        const keep = depthGate * confWeight * (.18 + .82 * coherence) * Math.max(.04, 1 - texturePenalty);
-        const v = s * keep;
-        score[i] = v;
-        if ((x & 1) === 0 && (y & 1) === 0 && v > 0) active.push(v);
-      }
-
-      // 4) Initial denoising + mask extraction.
-      score = medianFilter3x3(score, w, h, 2);
-      active.sort((a, b) => a - b);
-      const lowThreshold = active.length ? Math.max(.0015, percentile(active, .12) * .65) : .004;
       let mask = new Uint8Array(w * h);
-      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) mask[y * w + x] = score[y * w + x] > lowThreshold ? 1 : 0;
+      for (let y = 0; y < h; y++) for (let x = cropX; x < w; x++) {
+        const i = y * w + x;
+        mask[i] = signed[i] > depthNoiseFloor ? 1 : 0;
+      }
+      if ($('#pipeSpeckles').checked) mask = removeSmallComponents(mask, w, h, Math.round(pipelineValue('speckleSize')));
 
-      // 5) Keep only significant connected components. No contour/fill/inpaint/bilateral cleanup here.
-      mask = removeSmallComponents(mask, w, h, Math.max(1, minBlob));
-
-      // 6) Keep reliable depth inside the component mask and apply only a light median cleanup.
       let clean = new Float32Array(w * h);
-      for (let i = 0; i < clean.length; i++) clean[i] = mask[i] ? score[i] : 0;
-      clean = medianFilter3x3(clean, w, h, 1);
+      for (let i = 0; i < clean.length; i++) if (mask[i]) clean[i] = signed[i];
+      if ($('#pipeFill').checked) {
+        const radius = Math.round(pipelineValue('fillRadius'));
+        const closed = erodeMask(dilateMask(mask, w, h, radius), w, h, radius);
+        const weights = new Float32Array(mask.length);
+        for (let i = 0; i < weights.length; i++) weights[i] = mask[i] ? (.1 + (confMap ? confMap[i] : 1)) : 0;
+        const filled = weightedGaussian(signed, weights, w, h, Math.max(1, radius));
+        for (let i = 0; i < clean.length; i++) if (closed[i]) { if (!mask[i]) clean[i] = filled[i]; mask[i] = 1; }
+      }
+      if ($('#pipeSpeckles').checked) clean = suppressDepthSpikes(clean, mask, w, h, Math.round(pipelineValue('speckleSize')));
+      clean = smoothDepthBoundary(clean, mask, w, h, 10);
+      if ($('#pipeMedian').checked) clean = weightedMedianDepth(clean, mask, confMap, null, w, h, Math.round(pipelineValue('medianRadius')));
 
-      // 8) Normalize to grayscale depth: black = far, white = near.
       const nz = [];
       for (let y = 0; y < h; y += 2) for (let x = cropX; x < w; x += 2) { const v = clean[y * w + x]; if (v > .0005) nz.push(v); }
       nz.sort((a, b) => a - b);
@@ -1433,6 +1504,19 @@ void main(){
     }
 
     // UI events
+    let pipelineTimer = 0;
+    const refreshPipeline = () => {
+      clearTimeout(pipelineTimer);
+      pipelineTimer = setTimeout(() => { if (!processedDepth) return; rebuildDepthPreview(); buildMesh(); sched(); }, 120);
+    };
+    $('#settingsBtn').onclick = () => { $('#settingsPanel').hidden = !$('#settingsPanel').hidden; };
+    $('#settingsClose').onclick = () => { $('#settingsPanel').hidden = true; };
+    pipelineIds.forEach(id => {
+      const el = $('#' + id), output = el.parentElement.querySelector('output');
+      const show = () => { output.textContent = el.value; };
+      el.addEventListener('input', () => { show(); refreshPipeline(); }); show();
+    });
+    ['pipeSpeckles', 'pipeFill', 'pipeMedian'].forEach(id => $('#' + id).addEventListener('change', refreshPipeline));
     syncPair(depthR, depthN); syncPair(qualityR, qualityN); syncPair(gaussR, gaussN); syncPair(textureR, textureN); syncPair(blobR, blobN); syncPair(layersR, layersN); syncPair(periodR, periodN); syncPair(meshSmoothR, meshSmoothN);
     setPair(qualityR, qualityN, 6);
     setPair(textureR, textureN, 0);
