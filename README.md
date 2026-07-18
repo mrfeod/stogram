@@ -1,16 +1,17 @@
-<h1><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="48" align="absmiddle"> <a href="https://mrfeod.github.io/stogram/">Stogram: Stereogram Viewer</a></h1>
+<h1><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="48" align="bottom"> <a href="https://mrfeod.github.io/stogram/">Stogram: Stereogram Viewer</a></h1>
 
 An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
 
-<div align="center" style="display: flex; align-items: center; gap: 10px;">
-  <img src="src/images/camel.jpg" alt="Camel stereogram" style="max-height: 512px; max-width: 31%;">
-  <span>→</span>
-  <img src="src/demo/depth.jpg" alt="Reconstructed camel depth map" style="max-height: 512px; max-width: 31%;">
-  <span>→</span>
-  <video src="src/demo/example.mp4" controls style="max-height: 512px; max-width: 31%;">
-    <a href="src/demo/example.mp4">View the 3D result</a>
-  </video>
-</div>
+<p align="center">
+  Strereogram<br>
+  <img src="src/images/camel.jpg" alt="Camel stereogram" height="256"><br>
+  ↓<br>Depth map<br>
+  <img src="src/demo/depth.jpg" alt="Reconstructed camel depth map" height="256"><br>
+  ↓<br>
+  3D surface
+</p>
+
+https://github.com/user-attachments/assets/64e0dce7-1e36-4c20-89b7-d53d04603865
 
 ## Features
 
