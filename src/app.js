@@ -5,6 +5,7 @@ const $ = s => document.querySelector(s);
 const cv = $('#view'), depthCv = $('#depthView'),
       depthCtx = depthCv.getContext('2d'), fi = $('#file'),
       textureFi = $('#textureFile'), drop = $('#drop'), thumb = $('#thumb'),
+      stage = cv.parentElement,
       progressOverlay = $('#progressOverlay'),
       progressText = $('#progressText'), progressBar = $('#progressBar');
 const depthR = $('#depth'), depthN = $('#depthNum');
@@ -846,7 +847,9 @@ function renderGBuffer() {
 }
 function resize() {
   const dpr = Math.min(devicePixelRatio || 1, 2),
-        r = cv.getBoundingClientRect();
+        // The WebGL canvas is hidden in depth-map mode and therefore has a
+        // zero-sized client rect. The stage remains measurable in every mode.
+        r = stage.getBoundingClientRect();
   cv.width = Math.max(1, Math.round(r.width * dpr));
   cv.height = Math.max(1, Math.round(r.height * dpr));
   depthCv.width = cv.width;
