@@ -4,6 +4,8 @@ layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec2 aGradient;
 uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect;
+uniform sampler2D uDepthTex;
+uniform float uUseDepthTex;
 out vec2 vSourceUV;
 out vec3 vNormal;
 out vec3 vWorldPos;
@@ -13,8 +15,18 @@ vec3 rotate3(vec3 p){
   return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
 }
 void main(){
-  vec3 p=rotate3(vec3(aXY,aDepth*uDepthScale*uSign));
-  vec3 n=normalize(vec3(-aGradient.x*uDepthScale*uSign,-aGradient.y*uDepthScale*uSign,1.0));
+  vec2 depthUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
+  vec2 texel=1.0/vec2(textureSize(uDepthTex,0));
+  float dL=texture(uDepthTex,depthUV-vec2(texel.x,0.0)).r;
+  float dR=texture(uDepthTex,depthUV+vec2(texel.x,0.0)).r;
+  float dU=texture(uDepthTex,depthUV-vec2(0.0,texel.y)).r;
+  float dD=texture(uDepthTex,depthUV+vec2(0.0,texel.y)).r;
+  float sampledDepth=texture(uDepthTex,depthUV).r;
+  float depth=mix(aDepth,sampledDepth,uUseDepthTex);
+  vec2 sampledGradient=vec2(dR-dL,dD-dU)*float(textureSize(uDepthTex,0).x)*0.23;
+  vec2 gradient=mix(aGradient,sampledGradient,uUseDepthTex);
+  vec3 p=rotate3(vec3(aXY,depth*uDepthScale*uSign));
+  vec3 n=normalize(vec3(-gradient.x*uDepthScale*uSign,-gradient.y*uDepthScale*uSign,1.0));
   n=normalize(rotate3(n));
   float camDist=3.2;
   float cz=camDist-p.z;
@@ -49,13 +61,17 @@ layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 uniform float uYaw,uPitch,uDepthScale,uSign;
 uniform mat4 uLightVP;
+uniform sampler2D uDepthTex;
+uniform float uUseDepthTex,uSourceCrop,uSourceAspect;
 vec3 rotate3(vec3 p){
   float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
   return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
 }
 void main(){
-  vec3 p=rotate3(vec3(aXY,aDepth*uDepthScale*uSign));
+  vec2 uv=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
+  float depth=mix(aDepth,texture(uDepthTex,uv).r,uUseDepthTex);
+  vec3 p=rotate3(vec3(aXY,depth*uDepthScale*uSign));
   gl_Position=uLightVP*vec4(p,1.0);
 }`;
 
@@ -93,12 +109,12 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L){
   if(proj.x<=0.0||proj.x>=1.0||proj.y<=0.0||proj.y>=1.0||proj.z<=0.0||proj.z>=1.0) return 0.0;
   float bias=max(uBiasBase, uBiasSlope*(1.0-max(dot(N,L),0.0)));
   float shadow=0.0;
-  for(int yy=-1;yy<=1;yy++) for(int xx=-1;xx<=1;xx++){
+  for(int yy=-2;yy<=2;yy++) for(int xx=-2;xx<=2;xx++){
     vec2 off=vec2(float(xx),float(yy))*uShadowTexel*uPcfRadius;
     float depth=texture(uShadowTex, proj.xy+off).r;
     shadow += (proj.z-bias>depth) ? 1.0 : 0.0;
   }
-  float s=shadow/9.0;
+  float s=shadow/25.0;
   float width=mix(0.45,0.02,clamp(uShadowHardness,0.0,1.0));
   return smoothstep(0.5-width,0.5+width,s);
 }

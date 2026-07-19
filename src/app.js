@@ -16,7 +16,6 @@ const autoBtn = $('#auto');
 const ANALYSIS_SIZE = 512;
 const ANALYSIS_SIGMA = 0.24;
 const MESH_STEP_PX = 2;
-const MESH_SMOOTH_AMOUNT = 0.6;
 const SPECKLE_SIZE = 200;
 const FILL_RADIUS = 8;
 const MEDIAN_RADIUS = 8;
@@ -39,6 +38,7 @@ let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0;
+let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 let meshSourceBounds = {minX: -1, maxX: 1, minY: -1, maxY: 1, minD: 0, maxD: 0};
 function setProgress(value, _label) {
   const v = Math.max(0, Math.min(1, Number(value) || 0));
@@ -594,8 +594,8 @@ function lightParams() {
     shininess: 5.0,
     biasBase: 0.02,
     biasSlope: 0.0,
-    pcfRadius: 1.0,
-    shadowHardness: 0.7
+    pcfRadius: 2.3,
+    shadowHardness: 0.12
   };
 }
 function lightDirCameraSpace() {
@@ -660,6 +660,8 @@ const GU = {
   zoom: gl.getUniformLocation(gProg, 'uZoom'),
   aspect: gl.getUniformLocation(gProg, 'uAspect'),
   sourceTex: gl.getUniformLocation(gProg, 'uSourceTex'),
+  depthTex: gl.getUniformLocation(gProg, 'uDepthTex'),
+  useDepthTex: gl.getUniformLocation(gProg, 'uUseDepthTex'),
   sourceCrop: gl.getUniformLocation(gProg, 'uSourceCrop'),
   sourceAspect: gl.getUniformLocation(gProg, 'uSourceAspect')
 };
@@ -668,7 +670,11 @@ const SU = {
   pitch: gl.getUniformLocation(shadowProg, 'uPitch'),
   depth: gl.getUniformLocation(shadowProg, 'uDepthScale'),
   sign: gl.getUniformLocation(shadowProg, 'uSign'),
-  lightVP: gl.getUniformLocation(shadowProg, 'uLightVP')
+  lightVP: gl.getUniformLocation(shadowProg, 'uLightVP'),
+  depthTex: gl.getUniformLocation(shadowProg, 'uDepthTex'),
+  useDepthTex: gl.getUniformLocation(shadowProg, 'uUseDepthTex'),
+  sourceCrop: gl.getUniformLocation(shadowProg, 'uSourceCrop'),
+  sourceAspect: gl.getUniformLocation(shadowProg, 'uSourceAspect')
 };
 const LU = {
   albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'),
@@ -706,6 +712,17 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 gl.texImage2D(
     gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
     new Uint8Array([255, 255, 255, 255]));
+const depthSurfaceTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
+const floatLinearFiltering = gl.getExtension('OES_texture_float_linear');
+const depthTextureFilter = floatLinearFiltering ? gl.LINEAR : gl.NEAREST;
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, depthTextureFilter);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, depthTextureFilter);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT,
+    new Float32Array([0]));
 let shadowSize = 2048;
 const shadowTex = gl.createTexture();
 const shadowFbo = gl.createFramebuffer();
@@ -924,6 +941,12 @@ function renderShadowMap(lightVP) {
   gl.uniform1f(SU.pitch, pitch);
   gl.uniform1f(SU.depth, (+depthR.value || 0) / 100);
   gl.uniform1f(SU.sign, currentShape());
+  gl.uniform1f(SU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
+  gl.uniform1f(SU.sourceCrop, cropX / Math.max(1, mapW));
+  gl.uniform1f(SU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+  gl.activeTexture(gl.TEXTURE5);
+  gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
+  gl.uniform1i(SU.depthTex, 5);
   gl.uniformMatrix4fv(SU.lightVP, false, lightVP);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
   gl.bindVertexArray(null);
@@ -947,9 +970,13 @@ function renderGBuffer() {
   gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
   gl.uniform1f(GU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+  gl.uniform1f(GU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
   gl.activeTexture(gl.TEXTURE4);
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.uniform1i(GU.sourceTex, 4);
+  gl.activeTexture(gl.TEXTURE5);
+  gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
+  gl.uniform1i(GU.depthTex, 5);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
   gl.bindVertexArray(null);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1120,16 +1147,6 @@ function gaussianBlur(src, w, h, sigma) {
     }
   return out;
 }
-function blockMedian(src, w, h, x, y, r) {
-  const vals = [];
-  const x0 = Math.max(cropX, x - r), x1 = Math.min(w - 1, x + r),
-        y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
-  for (let yy = y0; yy <= y1; yy++)
-    for (let xx = x0; xx <= x1; xx++) vals.push(src[yy * w + xx]);
-  vals.sort((a, b) => a - b);
-  return vals[(vals.length / 2) | 0];
-}
-
 function updateSourceModeUi() {
   periodR.parentElement.classList.toggle('disabled', loadedDepthMap);
 }
@@ -1435,6 +1452,8 @@ function buildMesh() {
   const sign = currentShape(), mode = currentViewMode();
 
   if (mode === 'layers') {
+    surfaceUsesDepthTexture = false;
+    surfaceGridKey = '';
     // Independent horizontal cut-out planes. Convex and concave use opposite
     // cut rules.
     const layerSource =
@@ -1511,69 +1530,36 @@ function buildMesh() {
         gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, iq), gl.STATIC_DRAW);
     return;
   }
-  // Continuous surface mode: build geometry from the cleaned depth-map result,
-  // so the same denoised depth estimation drives both the 2D depth preview and
-  // the 3D surface.
+  // Surface mode uses a permanent regular grid. Depth and gradients are read
+  // in both geometry passes from an R32F texture, so changing depth no longer
+  // rebuilds or uploads the vertex buffer.
   const surfaceMap = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
       cleanDepthMap :
       processedDepth;
-  let sampled = new Float32Array(nx * ny);
-  const radius = Math.min(2, Math.max(1, Math.floor(stepPx / 2)));
-  for (let gy = 0; gy < ny; gy++) {
-    const y = ys[gy];
-    for (let gx = 0; gx < nx; gx++) {
-      sampled[gy * nx + gx] =
-          blockMedian(surfaceMap, mapW, mapH, xs[gx], y, radius);
-    }
-  }
-  const meshAmount = MESH_SMOOTH_AMOUNT;
-  if (meshAmount > 0) {
-    let cur = sampled.slice();
-    const passes = 1 + (meshAmount > .45 ? 1 : 0) + (meshAmount > .75 ? 1 : 0);
-    const alpha = .12 + meshAmount * .55;
-    for (let pass = 0; pass < passes; pass++) {
-      const out = cur.slice();
-      for (let gy = 1; gy < ny - 1; gy++)
-        for (let gx = 1; gx < nx - 1; gx++) {
-          const i = gy * nx + gx;
-          const avg =
-              (cur[i - 1] + cur[i + 1] + cur[i - nx] + cur[i + nx]) * .25;
-          out[i] = cur[i] * (1 - alpha) + avg * alpha;
-        }
-      cur = out;
-    }
-    sampled = cur;
-  }
+  gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.R32F, mapW, mapH, 0, gl.RED, gl.FLOAT,
+      surfaceMap);
+  surfaceUsesDepthTexture = true;
+  const key = `${mapW}:${mapH}:${cropX}:${stepPx}`;
+  if (key === surfaceGridKey) return;
+  surfaceGridKey = key;
   const verts = new Float32Array(nx * ny * 5);
   let o = 0;
-  for (let gy = 0; gy < ny; gy++) {
-    const y = ys[gy];
+  for (let gy = 0; gy < ny; gy++)
     for (let gx = 0; gx < nx; gx++) {
-      const x = xs[gx], i = y * mapW + x;
-      const zm = sampled[gy * nx + gx];
-      const xm = Math.max(0, gx - 1), xp = Math.min(nx - 1, gx + 1),
-            ym = Math.max(0, gy - 1), yp = Math.min(ny - 1, gy + 1);
-      const gradX =
-          (sampled[gy * nx + xp] - sampled[gy * nx + xm]) * visibleW * .23;
-      const gradY =
-          -(sampled[yp * nx + gx] - sampled[ym * nx + gx]) * visibleW * .23;
-      verts[o++] = (x - centerX) / visibleW * 2;
-      verts[o++] = (mapH * .5 - y) / visibleW * 2;
-      verts[o++] = zm;
-      verts[o++] = Math.max(-10, Math.min(10, gradX));
-      verts[o++] = Math.max(-10, Math.min(10, gradY));
+      verts[o++] = (xs[gx] - centerX) / visibleW * 2;
+      verts[o++] = (mapH * .5 - ys[gy]) / visibleW * 2;
+      verts[o++] = 0;
+      verts[o++] = 0;
+      verts[o++] = 0;
     }
-  }
-  const indices = new Uint32Array(Math.max(0, (nx - 1) * (ny - 1) * 6));
+  const indices = new Uint32Array((nx - 1) * (ny - 1) * 6);
   let q = 0;
   for (let y = 0; y < ny - 1; y++)
     for (let x = 0; x < nx - 1; x++) {
       const a = y * nx + x, b = a + 1, c = a + nx, d = c + 1;
-      const ia = ys[y] * mapW + xs[x], ib = ys[y] * mapW + xs[x + 1],
-            ic = ys[y + 1] * mapW + xs[x], id = ys[y + 1] * mapW + xs[x + 1];
-      // In Surface mode keep triangles across depth steps so sharp changes
-      // become visible walls, not black holes; ordinary depth jumps stay
-      // connected.
       indices[q++] = a;
       indices[q++] = c;
       indices[q++] = b;
@@ -1582,12 +1568,16 @@ function buildMesh() {
       indices[q++] = d;
     }
   meshIndexCount = q;
-  updateMeshBoundsFromVerts(verts);
+  meshSourceBounds = {
+    minX: -1, maxX: 1,
+    minY: (mapH * .5 - ys[ny - 1]) / visibleW * 2,
+    maxY: (mapH * .5 - ys[0]) / visibleW * 2,
+    minD: 0, maxD: 1,
+  };
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-  gl.bufferData(
-      gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, q), gl.STATIC_DRAW);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
 }
 
 function morphMask(mask, w, h, r, dilate) {
