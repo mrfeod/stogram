@@ -1935,7 +1935,6 @@ function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
 }
 function depthDisplayValue(depth, shape) {
   const value = Math.max(0, Math.min(1, depth));
-  if (value <= 0) return 0;
   const normalized = Math.pow(value, .82);
   return shape > 0 ? normalized : 1 - normalized;
 }

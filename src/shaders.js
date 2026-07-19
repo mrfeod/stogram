@@ -36,13 +36,18 @@ float depthWithVoidPattern(vec2 uv,float sourceDepth){
   bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
       pixel.y<=1.0||pixel.y>=size.y-1.0;
   if(border) return 0.0;
+  float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
+  if(sourceDepth>=0.995) return sourceDepth+pattern;
   if(sourceDepth>0.00001) return sourceDepth;
-  return (5.0+5.0*livingVoronoi(uv))/255.0;
+  return pattern;
 }
 float signedMeshDepth(vec2 uv,float sourceDepth){
   float meshDepth=depthWithVoidPattern(uv,sourceDepth);
   if(meshDepth<=0.00001) return 0.0;
-  return sourceDepth>0.00001&&uSign<0.0?1.0-meshDepth:meshDepth;
+  float base=uSign<0.0?1.0-sourceDepth:sourceDepth;
+  if(sourceDepth<=0.00001) return base+meshDepth;
+  if(sourceDepth>=0.995) return base+(meshDepth-sourceDepth);
+  return base;
 }
 void main(){
   vec2 depthUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
@@ -123,13 +128,18 @@ float depthWithVoidPattern(vec2 uv,float sourceDepth){
   bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
       pixel.y<=1.0||pixel.y>=size.y-1.0;
   if(border) return 0.0;
+  float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
+  if(sourceDepth>=0.995) return sourceDepth+pattern;
   if(sourceDepth>0.00001) return sourceDepth;
-  return (5.0+5.0*livingVoronoi(uv))/255.0;
+  return pattern;
 }
 float signedMeshDepth(vec2 uv,float sourceDepth){
   float meshDepth=depthWithVoidPattern(uv,sourceDepth);
   if(meshDepth<=0.00001) return 0.0;
-  return sourceDepth>0.00001&&uSign<0.0?1.0-meshDepth:meshDepth;
+  float base=uSign<0.0?1.0-sourceDepth:sourceDepth;
+  if(sourceDepth<=0.00001) return base+meshDepth;
+  if(sourceDepth>=0.995) return base+(meshDepth-sourceDepth);
+  return base;
 }
 void main(){
   vec2 uv=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
