@@ -9,7 +9,7 @@ An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map 
   <img src="src/demo/depth.jpg" alt="Reconstructed camel depth map" height="256"><br>
   ↓<br>
   3D surface<br>
-  <video src="https://github.com/user-attachments/assets/64e0dce7-1e36-4c20-89b7-d53d04603865" height="256" controls></video>
+  <img src="src/demo/example.gif" alt="3D surface" height="256"><br>
 </p>
 
 ## Features
