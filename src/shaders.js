@@ -187,7 +187,10 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L){
   float shadow=0.0;
   for(int yy=-2;yy<=2;yy++) for(int xx=-2;xx<=2;xx++){
     vec2 off=vec2(float(xx),float(yy))*uShadowTexel*uPcfRadius;
-    float depth=texture(uShadowTex, proj.xy+off).r;
+    vec2 sampleUV=proj.xy+off;
+    vec2 edge=uShadowTexel*0.5;
+    if(any(lessThan(sampleUV,edge))||any(greaterThan(sampleUV,vec2(1.0)-edge))) continue;
+    float depth=texture(uShadowTex,sampleUV).r;
     shadow += (proj.z-bias>depth) ? 1.0 : 0.0;
   }
   float s=shadow/25.0;
@@ -214,8 +217,9 @@ void main(){
   }
   vec3 H=normalize(L+V);
   float spec=pow(max(dot(N,H),0.0), max(1.0,uShininess));
-  float direct=(1.0-shadow*uShadowStrength)*uDiffuse*ndl;
+  float shadowAmount=clamp(shadow*uShadowStrength,0.0,1.0);
+  float direct=(1.0-shadowAmount)*uDiffuse*ndl;
   float illumination=uAmbient + uFill + direct - selfShade;
-  vec3 color=albedo*illumination + vec3(uSpecular*spec*(1.0-shadow*uShadowStrength));
+  vec3 color=albedo*illumination + vec3(uSpecular*spec*(1.0-shadowAmount));
   outColor=vec4(clamp(color,0.0,1.0),1.0);
 }`;

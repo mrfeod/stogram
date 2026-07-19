@@ -595,12 +595,12 @@ function lightParams() {
     ambient: 0.7,
     diffuse: 0.9,
     fill: 0.0,
-    shadowStrength: 1.4,
+    shadowStrength: 1.0,
     selfShade: 0.5,
     specular: 0.1,
     shininess: 5.0,
-    biasBase: 0.02,
-    biasSlope: 0.0,
+    biasBase: 0.0008,
+    biasSlope: 0.003,
     pcfRadius: 2.3,
     shadowHardness: 0.12
   };
@@ -883,11 +883,26 @@ function computeLightVP() {
   const scale = (+depthR.value || 0) / 100;
   const sign = currentShape();
   const b = meshSourceBounds;
+  let minDepth, maxDepth;
+  if (surfaceUsesDepthTexture) {
+    // The texture-driven surface stays in a positive depth range for both
+    // shapes. Extreme black/white values can receive up to 10/255 of
+    // procedural relief in the vertex shaders.
+    minDepth = 0;
+    maxDepth = 1 + 10 / 255;
+  } else if (sign < 0) {
+    // CPU geometry uses the same 1-depth transform as both vertex shaders.
+    minDepth = 1 - b.maxD;
+    maxDepth = 1 - b.minD;
+  } else {
+    minDepth = b.minD;
+    maxDepth = b.maxD;
+  }
   const corners = [];
   for (const x of [b.minX, b.maxX])
     for (const y of [b.minY, b.maxY])
-      for (const d0 of [b.minD, b.maxD]) {
-        corners.push(rotatePoint({x, y, z: d0 * scale * sign}, yaw, pitch));
+      for (const d0 of [minDepth, maxDepth]) {
+        corners.push(rotatePoint({x, y, z: d0 * scale}, yaw, pitch));
       }
   let cminX = Infinity, cmaxX = -Infinity, cminY = Infinity, cmaxY = -Infinity,
       cminZ = Infinity, cmaxZ = -Infinity;
@@ -942,8 +957,6 @@ function renderShadowMap(lightVP) {
   gl.viewport(0, 0, shadowSize, shadowSize);
   gl.clear(gl.DEPTH_BUFFER_BIT);
   gl.colorMask(false, false, false, false);
-  gl.enable(gl.POLYGON_OFFSET_FILL);
-  gl.polygonOffset(1.5, 4.0);
   gl.useProgram(shadowProg);
   gl.bindVertexArray(vao);
   gl.uniform1f(SU.yaw, yaw);
@@ -960,7 +973,6 @@ function renderShadowMap(lightVP) {
   gl.uniformMatrix4fv(SU.lightVP, false, lightVP);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
   gl.bindVertexArray(null);
-  gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.colorMask(true, true, true, true);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, cv.width, cv.height);
