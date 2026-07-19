@@ -96,9 +96,10 @@ function disparityWorkerMain() {
   }
   function robustDepthClean(base, conf, w, h, bg, cropX, id) {
     let cur = base.slice();
+    let out = new Float32Array(base.length);
     const vals = new Float32Array(9), devs = new Float32Array(9);
     for (let pass = 0; pass < 2; pass++) {
-      const out = cur.slice();
+      out.set(cur);
       for (let y = 1; y < h - 1; y++) {
         for (let x = Math.max(cropX + 1, 1); x < w - 1; x++) {
           const i = y * w + x;
@@ -125,11 +126,14 @@ function disparityWorkerMain() {
           postProgress(
               id, .88 + pass * .045 + (y / h) * .04, 'Очистка глубины…');
       }
+      const swap = cur;
       cur = out;
+      out = swap;
     }
     return cur;
   }
   onmessage = e => {
+    const startedAt = performance.now();
     const {id, grayBuffer, w, h, p} = e.data;
     const gray = new Float32Array(grayBuffer);
     const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
@@ -171,7 +175,7 @@ function disparityWorkerMain() {
           postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
       }
     const aggregate = new Uint16Array(costs.length);
-    const prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
+    let prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
     function addPath(startX, startY, dx, dy) {
       let vx = startX, y = startY, first = true;
       while (vx >= 0 && vx < validW && y >= 0 && y < h) {
@@ -199,7 +203,12 @@ function disparityWorkerMain() {
                 Math.min(65535, aggregate[off + di] + Math.round(cur[di]));
           }
         }
-        prev.set(cur);
+        // The next pixel only needs the just-computed vector. Swapping the two
+        // scratch buffers is equivalent to prev.set(cur), but avoids copying
+        // the complete disparity vector at every SGM step.
+        const swap = prev;
+        prev = cur;
+        cur = swap;
         vx += dx;
         y += dy;
       }
@@ -239,8 +248,9 @@ function disparityWorkerMain() {
     // Iterated conditional modes: re-check nearby disparities using the
     // original SGM costs plus support from reliable neighbours. Image edges
     // weaken support.
+    let nextDisp = new Int16Array(pixels),
+        nextReliability = new Float32Array(pixels);
     for (let pass = 0; pass < 3; pass++) {
-      const nextDisp = dispIndex.slice(), nextReliability = reliability.slice();
       for (let y = 0; y < h; y++)
         for (let vx = 0; vx < validW; vx++) {
           const pi = y * validW + vx, center = dispIndex[pi],
@@ -282,8 +292,12 @@ function disparityWorkerMain() {
                   1, (secondEnergy - bestEnergy) / Math.max(8, secondEnergy)));
           nextReliability[pi] = reliability[pi] * .6 + localConfidence * .4;
         }
+      let swap = dispIndex;
       dispIndex = nextDisp;
+      nextDisp = swap;
+      swap = reliability;
       reliability = nextReliability;
+      nextReliability = swap;
       postProgress(id, .71 + pass * .025, 'Проверка соседних смещений…');
     }
     const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
@@ -305,9 +319,11 @@ function disparityWorkerMain() {
       }
     }
     let t = raw, c = conf;
+    let out = new Float32Array(t.length), outC = new Float32Array(c.length);
     const vals = new Float32Array(25);
     for (let pass = 0; pass < 2; pass++) {
-      const out = t.slice(), outC = c.slice();
+      out.set(t);
+      outC.set(c);
       const radius = pass === 0 ? 2 : 1;
       for (let y = radius; y < h - radius; y++) {
         for (let x = Math.max(xStart, radius); x < w - radius; x++) {
@@ -343,8 +359,12 @@ function disparityWorkerMain() {
               id, .74 + pass * .045 + (y / h) * .04,
               'Заполнение ненадёжных областей…');
       }
+      let swap = t;
       t = out;
+      out = swap;
+      swap = c;
       c = outC;
+      outC = swap;
     }
     const samples = [];
     for (let y = 4; y < h - 4; y += 3)
@@ -371,6 +391,7 @@ function disparityWorkerMain() {
           id,
           bgDepth,
           cropX,
+          processingMs: performance.now() - startedAt,
           rawDepth: rawDepth.buffer,
           confMap: confMap.buffer
         },
@@ -1230,6 +1251,7 @@ function recoverDepth(gray, w, h, p, existingJob = null) {
         confMap = new Float32Array(m.confMap);
         bgDepth = m.bgDepth;
         cropX = m.cropX;
+        console.info(`Depth worker: ${m.processingMs.toFixed(0)} ms`);
         worker.terminate();
         if (disparityWorker === worker) disparityWorker = null;
         setProgress(.97, 'Постобработка и построение поверхности…');
