@@ -135,8 +135,9 @@ function disparityWorkerMain() {
   }
   onmessage = e => {
     const startedAt = performance.now();
-    const {id, grayBuffer, packedCostsBuffer, packedAggregateBuffer,
-           wordsPerPixel, w, h, p} = e.data;
+    const {id, grayBuffer, packedCostsBuffer, packedDisparityBuffer,
+           reliabilityBuffer, wordsPerPixel,
+           w, h, p} = e.data;
     const gray = new Float32Array(grayBuffer);
     const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
     const minDisp = -Math.max(2, Math.floor(p * .08));
@@ -230,19 +231,23 @@ function disparityWorkerMain() {
             postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
         }
     }
-    let aggregate, usedGpuSgm = false;
-    if (usedGpuCosts && packedAggregateBuffer) {
-      const packed = new Uint32Array(packedAggregateBuffer),
-            expectedWords = Math.ceil(costs.length / 2);
-      if (packed.length === expectedWords) {
-        aggregate = new Uint16Array(costs.length);
-        for (let i = 0; i < aggregate.length; i++)
-          aggregate[i] =
-              (packed[i >> 1] >>> ((i & 1) * 16)) & 65535;
+    let dispIndex, reliability, usedGpuIcm = false, usedGpuSgm = false;
+    if (usedGpuCosts && packedDisparityBuffer && reliabilityBuffer) {
+      const packed = new Uint32Array(packedDisparityBuffer),
+            gpuReliability = new Float32Array(reliabilityBuffer);
+      if (packed.length === Math.ceil(pixels / 2) &&
+          gpuReliability.length === pixels) {
+        dispIndex = new Int16Array(pixels);
+        for (let i = 0; i < pixels; i++)
+          dispIndex[i] = (packed[i >> 1] >>> ((i & 1) * 16)) & 65535;
+        reliability = gpuReliability;
+        usedGpuIcm = true;
         usedGpuSgm = true;
-        postProgress(id, .70, 'Распаковка WebGPU SGM…');
+        postProgress(id, .78, 'Распаковка WebGPU disparity…');
       }
     }
+    if (!dispIndex) {
+    let aggregate;
     if (!aggregate) {
       aggregate = new Uint16Array(costs.length);
       let prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
@@ -294,8 +299,8 @@ function disparityWorkerMain() {
       }
       postProgress(id, .70, 'SGM по вертикали…');
     }
-    let dispIndex = new Int16Array(pixels),
-        reliability = new Float32Array(pixels);
+    dispIndex = new Int16Array(pixels);
+    reliability = new Float32Array(pixels);
     for (let y = 0; y < h; y++)
       for (let vx = 0; vx < validW; vx++) {
         const pi = y * validW + vx, off = pi * dispCount;
@@ -368,6 +373,7 @@ function disparityWorkerMain() {
       reliability = nextReliability;
       nextReliability = swap;
       postProgress(id, .71 + pass * .025, 'Проверка соседних смещений…');
+    }
     }
     const raw = new Float32Array(w * h), conf = new Float32Array(w * h);
     for (let y = 0; y < h; y++)
@@ -462,6 +468,7 @@ function disparityWorkerMain() {
           cropX,
           usedGpuCosts,
           usedGpuSgm,
+          usedGpuIcm,
           processingMs: performance.now() - startedAt,
           rawDepth: rawDepth.buffer,
           confMap: confMap.buffer
@@ -1336,7 +1343,8 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
         cropX = m.cropX;
         console.info(
             `Depth worker: ${m.processingMs.toFixed(0)} ms ` +
-            `(${m.usedGpuSgm ? 'WebGPU SGM' :
+            `(${m.usedGpuIcm ? 'WebGPU ICM' :
+                               m.usedGpuSgm ? 'WebGPU SGM' :
                                m.usedGpuCosts ? 'WebGPU costs' : 'CPU'})`);
         console.info(
             `Depth total: ${(performance.now() - totalStartedAt).toFixed(0)} ms`);
@@ -1361,10 +1369,12 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
     const transfers = [grayCopy.buffer];
     if (gpuCosts) {
       message.packedCostsBuffer = gpuCosts.packedCosts;
-      message.packedAggregateBuffer = gpuCosts.packedAggregate;
+      message.packedDisparityBuffer = gpuCosts.packedDisparity;
+      message.reliabilityBuffer = gpuCosts.reliability;
       message.wordsPerPixel = gpuCosts.wordsPerPixel;
       transfers.push(gpuCosts.packedCosts);
-      if (gpuCosts.packedAggregate) transfers.push(gpuCosts.packedAggregate);
+      if (gpuCosts.packedDisparity) transfers.push(gpuCosts.packedDisparity);
+      if (gpuCosts.reliability) transfers.push(gpuCosts.reliability);
     }
     worker.postMessage(message, transfers);
   });

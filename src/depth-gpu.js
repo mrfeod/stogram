@@ -18,7 +18,11 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> packedCosts: array<u32>;
 @group(0) @binding(4) var<storage, read_write> aggregate: array<u32>;
 @group(0) @binding(5) var<uniform> direction: vec4<i32>;
-@group(0) @binding(6) var<storage, read_write> packedAggregate: array<u32>;
+@group(0) @binding(7) var<storage, read_write> disparityA: array<u32>;
+@group(0) @binding(8) var<storage, read_write> reliabilityA: array<f32>;
+@group(0) @binding(9) var<storage, read_write> disparityB: array<u32>;
+@group(0) @binding(10) var<storage, read_write> reliabilityB: array<f32>;
+@group(0) @binding(11) var<storage, read_write> packedDisparity: array<u32>;
 
 var<workgroup> pathPrev: array<f32, 96>;
 var<workgroup> pathCur: array<f32, 96>;
@@ -152,15 +156,104 @@ fn aggregatePath(
 }
 
 @compute @workgroup_size(64)
-fn packAggregate(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn selectDisparity(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi = i32(gid.x);
+  let pixels = params.validW * params.h;
+  if (pi >= pixels) { return; }
+  let off = pi * params.dispCount;
+  var bestD = 0;
+  var best = 0xffffffffu;
+  for (var di = 0; di < params.dispCount; di++) {
+    let value = aggregate[off + di];
+    if (value < best) {
+      best = value;
+      bestD = di;
+    }
+  }
+  var second = 0xffffffffu;
+  for (var di = 0; di < params.dispCount; di++) {
+    let value = aggregate[off + di];
+    if (abs(di - bestD) > 1 && value < second) { second = value; }
+  }
+  disparityA[pi] = u32(bestD);
+  reliabilityA[pi] = clamp(
+      (f32(second) - f32(best)) / max(8.0, f32(second)), 0.0, 1.0);
+}
+
+fn sourceDisparity(index: i32, fromB: bool) -> u32 {
+  return select(disparityA[index], disparityB[index], fromB);
+}
+
+fn sourceReliability(index: i32, fromB: bool) -> f32 {
+  return select(reliabilityA[index], reliabilityB[index], fromB);
+}
+
+@compute @workgroup_size(64)
+fn refineDisparity(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi = i32(gid.x);
+  let pixels = params.validW * params.h;
+  if (pi >= pixels) { return; }
+  let fromB = direction.x == 1;
+  let center = i32(sourceDisparity(pi, fromB));
+  let ownReliability = sourceReliability(pi, fromB);
+  let searchRange = select(2, 3, ownReliability < 0.045);
+  var bestD = center;
+  var bestEnergy = 1e30;
+  var secondEnergy = 1e30;
+  let vx = pi % params.validW;
+  let y = pi / params.validW;
+  for (var di = max(0, center - searchRange);
+       di <= min(params.dispCount - 1, center + searchRange); di++) {
+    var energy = f32(aggregate[pi * params.dispCount + di]);
+    for (var k = 0; k < 4; k++) {
+      var nx = vx;
+      var ny = y;
+      if (k == 0) { nx--; }
+      if (k == 1) { nx++; }
+      if (k == 2) { ny--; }
+      if (k == 3) { ny++; }
+      if (nx < 0 || nx >= params.validW || ny < 0 || ny >= params.h) {
+        continue;
+      }
+      let ni = ny * params.validW + nx;
+      let imageA = y * params.w + params.xStart + vx;
+      let imageB = ny * params.w + params.xStart + nx;
+      let edgeWeight = exp(-abs(gray[imageA] - gray[imageB]) / 20.0);
+      let neighbourWeight =
+          (0.15 + sourceReliability(ni, fromB) * 0.85) * edgeWeight;
+      energy += 4.5 * neighbourWeight *
+          min(4.0, abs(f32(di) - f32(sourceDisparity(ni, fromB))));
+    }
+    if (energy < bestEnergy) {
+      secondEnergy = bestEnergy;
+      bestEnergy = energy;
+      bestD = di;
+    } else if (energy < secondEnergy) {
+      secondEnergy = energy;
+    }
+  }
+  let localConfidence = clamp(
+      (secondEnergy - bestEnergy) / max(8.0, secondEnergy), 0.0, 1.0);
+  let nextReliability = ownReliability * 0.6 + localConfidence * 0.4;
+  if (fromB) {
+    disparityA[pi] = u32(bestD);
+    reliabilityA[pi] = nextReliability;
+  } else {
+    disparityB[pi] = u32(bestD);
+    reliabilityB[pi] = nextReliability;
+  }
+}
+
+@compute @workgroup_size(64)
+fn packFinalDisparity(@builtin(global_invocation_id) gid: vec3<u32>) {
   let wordIndex = i32(gid.x);
-  let valueCount = params.validW * params.h * params.dispCount;
+  let pixels = params.validW * params.h;
   let first = wordIndex * 2;
-  if (first >= valueCount) { return; }
-  let low = min(65535u, aggregate[first]);
+  if (first >= pixels) { return; }
+  let low = disparityB[first] & 65535u;
   var high = 0u;
-  if (first + 1 < valueCount) { high = min(65535u, aggregate[first + 1]); }
-  packedAggregate[wordIndex] = low | (high << 16u);
+  if (first + 1 < pixels) { high = disparityB[first + 1] & 65535u; }
+  packedDisparity[wordIndex] = low | (high << 16u);
 }
 `;
 
@@ -182,11 +275,22 @@ async function createGpuState() {
     layout: 'auto',
     compute: {module, entryPoint: 'aggregatePath'},
   });
-  const packPipeline = await device.createComputePipelineAsync({
+  const selectPipeline = await device.createComputePipelineAsync({
     layout: 'auto',
-    compute: {module, entryPoint: 'packAggregate'},
+    compute: {module, entryPoint: 'selectDisparity'},
   });
-  return {device, censusPipeline, costPipeline, sgmPipeline, packPipeline};
+  const refinePipeline = await device.createComputePipelineAsync({
+    layout: 'auto',
+    compute: {module, entryPoint: 'refineDisparity'},
+  });
+  const packFinalPipeline = await device.createComputePipelineAsync({
+    layout: 'auto',
+    compute: {module, entryPoint: 'packFinalDisparity'},
+  });
+  return {
+    device, censusPipeline, costPipeline, sgmPipeline,
+    selectPipeline, refinePipeline, packFinalPipeline,
+  };
 }
 
 function gpuState() {
@@ -201,7 +305,10 @@ function storageBuffer(device, size, usage) {
 export async function computeCostVolumeGpu(gray, w, h, period) {
   const state = await gpuState();
   if (!state) return null;
-  const {device, censusPipeline, costPipeline, sgmPipeline, packPipeline} = state;
+  const {
+    device, censusPipeline, costPipeline, sgmPipeline, selectPipeline,
+    refinePipeline, packFinalPipeline,
+  } = state;
   const minDisp = -Math.max(2, Math.floor(period * .08));
   const maxDisp = Math.max(4, Math.min(Math.floor(period * .34), 42));
   const dispCount = maxDisp - minDisp + 1;
@@ -212,7 +319,7 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   const wordsPerPixel = Math.ceil(dispCount / 4);
   const packedByteLength = pixels * wordsPerPixel * 4;
   const aggregateValues = pixels * dispCount;
-  const packedAggregateByteLength = Math.ceil(aggregateValues / 2) * 4;
+  const packedDisparityByteLength = Math.ceil(pixels / 2) * 4;
   const U = GPUBufferUsage;
   const paramsBuffer = storageBuffer(device, 32, U.UNIFORM | U.COPY_DST);
   const grayBuffer = storageBuffer(device, gray.byteLength, U.STORAGE | U.COPY_DST);
@@ -220,12 +327,19 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   const costsBuffer = storageBuffer(
       device, packedByteLength, U.STORAGE | U.COPY_SRC);
   const aggregateBuffer = storageBuffer(device, aggregateValues * 4, U.STORAGE);
-  const packedAggregateBuffer = storageBuffer(
-      device, packedAggregateByteLength, U.STORAGE | U.COPY_SRC);
+  const disparityA = storageBuffer(device, pixels * 4, U.STORAGE);
+  const reliabilityA = storageBuffer(device, pixels * 4, U.STORAGE);
+  const disparityB = storageBuffer(device, pixels * 4, U.STORAGE);
+  const reliabilityB = storageBuffer(
+      device, pixels * 4, U.STORAGE | U.COPY_SRC);
+  const packedDisparityBuffer = storageBuffer(
+      device, packedDisparityByteLength, U.STORAGE | U.COPY_SRC);
   const readBuffer = storageBuffer(
       device, packedByteLength, U.COPY_DST | U.MAP_READ);
-  const aggregateReadBuffer = storageBuffer(
-      device, packedAggregateByteLength, U.COPY_DST | U.MAP_READ);
+  const disparityReadBuffer = storageBuffer(
+      device, packedDisparityByteLength, U.COPY_DST | U.MAP_READ);
+  const reliabilityReadBuffer = storageBuffer(
+      device, pixels * 4, U.COPY_DST | U.MAP_READ);
   const params = new Int32Array([
     w, h, period, minDisp, dispCount, xStart, validW, wordsPerPixel,
   ]);
@@ -278,39 +392,85 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
       pass.dispatchWorkgroups(dir < 2 ? h : validW);
       pass.end();
     }
-    const packEntries = [
+    const selectionEntries = [
       {binding: 0, resource: {buffer: paramsBuffer}},
       {binding: 4, resource: {buffer: aggregateBuffer}},
-      {binding: 6, resource: {buffer: packedAggregateBuffer}},
+      {binding: 7, resource: {buffer: disparityA}},
+      {binding: 8, resource: {buffer: reliabilityA}},
     ];
     pass = encoder.beginComputePass();
-    pass.setPipeline(packPipeline);
+    pass.setPipeline(selectPipeline);
     pass.setBindGroup(0, device.createBindGroup({
-      layout: packPipeline.getBindGroupLayout(0), entries: packEntries,
+      layout: selectPipeline.getBindGroupLayout(0), entries: selectionEntries,
     }));
-    pass.dispatchWorkgroups(Math.ceil(Math.ceil(aggregateValues / 2) / 64));
+    pass.dispatchWorkgroups(Math.ceil(pixels / 64));
+    pass.end();
+    for (let refinement = 0; refinement < 3; refinement++) {
+      const refineEntries = [
+        {binding: 0, resource: {buffer: paramsBuffer}},
+        {binding: 1, resource: {buffer: grayBuffer}},
+        {binding: 4, resource: {buffer: aggregateBuffer}},
+        {binding: 5, resource: {buffer: directionBuffers[refinement & 1]}},
+        {binding: 7, resource: {buffer: disparityA}},
+        {binding: 8, resource: {buffer: reliabilityA}},
+        {binding: 9, resource: {buffer: disparityB}},
+        {binding: 10, resource: {buffer: reliabilityB}},
+      ];
+      pass = encoder.beginComputePass();
+      pass.setPipeline(refinePipeline);
+      pass.setBindGroup(0, device.createBindGroup({
+        layout: refinePipeline.getBindGroupLayout(0), entries: refineEntries,
+      }));
+      pass.dispatchWorkgroups(Math.ceil(pixels / 64));
+      pass.end();
+    }
+    const packFinalEntries = [
+      {binding: 0, resource: {buffer: paramsBuffer}},
+      {binding: 9, resource: {buffer: disparityB}},
+      {binding: 11, resource: {buffer: packedDisparityBuffer}},
+    ];
+    pass = encoder.beginComputePass();
+    pass.setPipeline(packFinalPipeline);
+    pass.setBindGroup(0, device.createBindGroup({
+      layout: packFinalPipeline.getBindGroupLayout(0),
+      entries: packFinalEntries,
+    }));
+    pass.dispatchWorkgroups(Math.ceil(Math.ceil(pixels / 2) / 64));
     pass.end();
     encoder.copyBufferToBuffer(
-        packedAggregateBuffer, 0, aggregateReadBuffer, 0,
-        packedAggregateByteLength);
+        packedDisparityBuffer, 0, disparityReadBuffer, 0,
+        packedDisparityByteLength);
+    encoder.copyBufferToBuffer(
+        reliabilityB, 0, reliabilityReadBuffer, 0, pixels * 4);
   }
   encoder.copyBufferToBuffer(costsBuffer, 0, readBuffer, 0, packedByteLength);
   device.queue.submit([encoder.finish()]);
   await Promise.all([
     readBuffer.mapAsync(GPUMapMode.READ),
-    dispCount <= 96 ? aggregateReadBuffer.mapAsync(GPUMapMode.READ) :
+    dispCount <= 96 ? disparityReadBuffer.mapAsync(GPUMapMode.READ) :
+                      Promise.resolve(),
+    dispCount <= 96 ? reliabilityReadBuffer.mapAsync(GPUMapMode.READ) :
                       Promise.resolve(),
   ]);
   const packedCosts = readBuffer.getMappedRange().slice(0);
-  const packedAggregate = dispCount <= 96 ?
-      aggregateReadBuffer.getMappedRange().slice(0) : null;
+  const packedDisparity = dispCount <= 96 ?
+      disparityReadBuffer.getMappedRange().slice(0) : null;
+  const reliability = dispCount <= 96 ?
+      reliabilityReadBuffer.getMappedRange().slice(0) : null;
   readBuffer.unmap();
-  if (dispCount <= 96) aggregateReadBuffer.unmap();
+  if (dispCount <= 96) {
+    disparityReadBuffer.unmap();
+    reliabilityReadBuffer.unmap();
+  }
   const processingMs = performance.now() - startedAt;
   for (const buffer of
        [paramsBuffer, grayBuffer, censusBuffer, costsBuffer, aggregateBuffer,
-        packedAggregateBuffer, readBuffer, aggregateReadBuffer,
+        disparityA, reliabilityA, disparityB, reliabilityB,
+        packedDisparityBuffer, readBuffer, disparityReadBuffer,
+        reliabilityReadBuffer,
         ...directionBuffers])
     buffer.destroy();
-  return {packedCosts, packedAggregate, wordsPerPixel, processingMs};
+  return {
+    packedCosts, packedDisparity, reliability, wordsPerPixel, processingMs,
+  };
 }
