@@ -1666,6 +1666,50 @@ function fillSmallMaskHoles(mask, w, h, maxSize) {
   }
   return out;
 }
+function buildHysteresisDepthMask(depth, confidence, w, h, highThreshold) {
+  const lowThreshold = Math.max(.0015, highThreshold * .30);
+  const weak = new Uint8Array(depth.length), out = new Uint8Array(depth.length),
+        queue = new Int32Array(depth.length);
+  let head = 0, tail = 0;
+  for (let y = 0; y < h; y++)
+    for (let x = cropX; x < w; x++) {
+      const i = y * w + x, v = depth[i];
+      if (v > highThreshold) {
+        out[i] = 1;
+        queue[tail++] = i;
+      }
+      if (v <= lowThreshold) continue;
+      let support = 0;
+      for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++)
+        for (let xx = Math.max(cropX, x - 1); xx <= Math.min(w - 1, x + 1); xx++)
+          if (depth[yy * w + xx] > lowThreshold) support++;
+      const reliable = !confidence || confidence[i] >= .025;
+      if (support >= 4 && (reliable || v > highThreshold * .55)) weak[i] = 1;
+    }
+  while (head < tail) {
+    const i = queue[head++], x = i % w, y = (i / w) | 0;
+    for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++)
+      for (let xx = Math.max(cropX, x - 1); xx <= Math.min(w - 1, x + 1); xx++) {
+        const j = yy * w + xx;
+        if (weak[j] && !out[j]) {
+          out[j] = 1;
+          queue[tail++] = j;
+        }
+      }
+  }
+  return out;
+}
+function smoothDepthMask(mask, w, h) {
+  const weights = new Float32Array(mask.length);
+  for (let i = 0; i < mask.length; i++) weights[i] = mask[i];
+  const coverage = gaussianBlur(weights, w, h, 2.35), out = new Uint8Array(mask.length);
+  for (let y = 0; y < h; y++)
+    for (let x = cropX; x < w; x++) {
+      const i = y * w + x;
+      out[i] = coverage[i] >= .47 ? 1 : 0;
+    }
+  return out;
+}
 function suppressDepthSpikes(src, surfaceMask, w, h, maxSize) {
   if (maxSize < 1) return src.slice();
   const medianMap = new Float32Array(src.length),
@@ -1766,13 +1810,13 @@ function smoothInsideMask(depth, mask, w, h, sigma = 4, finalSigma = 1.5) {
   const normalized = weightedGaussian(depth, weights, w, h, sigma);
   const smoothed = finalSigma > 0 ?
       gaussianBlur(normalized, w, h, finalSigma) : normalized;
-  const coverage = gaussianBlur(weights, w, h, 1.25);
+  const coverage = gaussianBlur(weights, w, h, 2.25);
   const effectiveCoverage = new Float32Array(coverage.length);
   for (let i = 0; i < smoothed.length; i++) {
     // A soft coverage mask behaves like contour antialiasing: the geometry
     // reaches the background over a couple of pixels instead of ending on a
     // staircase-shaped binary edge.
-    const alpha = coverage[i] <= .01 ? 0 : smoothstep(.02, .98, coverage[i]);
+    const alpha = coverage[i] <= .005 ? 0 : smoothstep(.015, .985, coverage[i]);
     effectiveCoverage[i] = alpha;
     smoothed[i] *= alpha;
     mask[i] = closedMask[i];
@@ -1885,13 +1929,10 @@ function rebuildDepthPreview() {
   const depthNoiseFloor = positives.length ?
       Math.max(.004, percentile(positives, .10) * .65) :
       .008;
-  let mask = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++)
-    for (let x = cropX; x < w; x++) {
-      const i = y * w + x;
-      mask[i] = signed[i] > depthNoiseFloor ? 1 : 0;
-    }
+  let mask = buildHysteresisDepthMask(
+      signed, confMap, w, h, depthNoiseFloor);
   mask = removeSmallComponents(mask, w, h, SPECKLE_SIZE);
+  mask = smoothDepthMask(mask, w, h);
 
   let clean = new Float32Array(w * h);
   for (let i = 0; i < clean.length; i++)
@@ -1937,8 +1978,12 @@ function rebuildDepthPreview() {
       const i = y * w + x, value = clean[i];
       const alpha = depthCoverage ? depthCoverage[i] : 1;
       const base = alpha > .01 ? value / alpha : value;
-      const stretched =
+      let stretched =
           base > 0 ? Math.max(0, Math.min(1, (base - lo) * inv)) : 0;
+      if (stretched > 0 && stretched < .28 && alpha > .82) {
+        const shadow = stretched / .28;
+        stretched = .28 * Math.pow(shadow, .72);
+      }
       const lin = stretched * alpha;
       cleanDepthMap[y * w + x] = lin;
       const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
