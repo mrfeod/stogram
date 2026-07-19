@@ -716,6 +716,9 @@ gl.depthFunc(gl.LEQUAL);
 gl.disable(gl.CULL_FACE);
 gl.clearColor(.045, .05, .06, 1);
 const sourceTex = gl.createTexture();
+const anisotropyExt = gl.getExtension('EXT_texture_filter_anisotropic') ||
+    gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic') ||
+    gl.getExtension('MOZ_EXT_texture_filter_anisotropic');
 gl.bindTexture(gl.TEXTURE_2D, sourceTex);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -1213,6 +1216,17 @@ function uploadTextureImage(image) {
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(
+      gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  if (anisotropyExt) {
+    const maximum = gl.getParameter(
+        anisotropyExt.MAX_TEXTURE_MAX_ANISOTROPY_EXT) || 1;
+    gl.texParameterf(
+        gl.TEXTURE_2D, anisotropyExt.TEXTURE_MAX_ANISOTROPY_EXT,
+        Math.min(8, maximum));
+  }
   textureLoaded = true;
   sched();
 }
