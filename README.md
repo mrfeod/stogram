@@ -1,6 +1,6 @@
 <h1><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="48" align="bottom"> <a href="https://mrfeod.github.io/stogram/">Stogram: Stereogram Viewer</a></h1>
 
-An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer: reconstructs a depth map, builds a 3D surface or layers, and allows the texture to be changed independently.
+An interactive [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer. It reconstructs depth, renders it as a shaded 3D surface or layers, and lets geometry and texture be replaced independently.
 
 <p align="center">
   Autostereogram<br>
@@ -19,6 +19,8 @@ An [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map 
 - Surface, layer, and 2D depth map modes.
 - Convex and concave geometry.
 - Independent texture replacement without losing the original stereogram and depth.
+- WebGPU-accelerated reconstruction and filtering with a CPU fallback.
+- Export of the depth map as PNG and the closed surface mesh as binary STL.
 
 ## Loading Images
 
@@ -60,12 +62,12 @@ A depth map replaces the geometry while preserving the current texture. If there
 
 ```text
 Stereogram
-    ↓ resize to 512 px + grayscale
+    ↓ resize to a maximum of 512 px + grayscale
 Global period search
     ↓ refinement using local blocks
 5×5 Census
     ↓ cost volume for possible disparities
-Four-direction SGM
+Four-direction SGM (WebGPU when available)
     ↓ best disparity selection + confidence
 3 local ICM refinement passes
     ↓ normalization and background detection
@@ -77,5 +79,5 @@ Soft contour coverage (antialiasing)
     ↓ robust 1–99% depth normalization
 Ready depth map
     ↓
-3D mesh or discrete layers
+Smoothed closed 3D mesh, discrete layers, PNG or STL
 ```
