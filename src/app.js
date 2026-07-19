@@ -135,7 +135,8 @@ function disparityWorkerMain() {
   }
   onmessage = e => {
     const startedAt = performance.now();
-    const {id, grayBuffer, packedCostsBuffer, wordsPerPixel, w, h, p} = e.data;
+    const {id, grayBuffer, packedCostsBuffer, packedAggregateBuffer,
+           wordsPerPixel, w, h, p} = e.data;
     const gray = new Float32Array(grayBuffer);
     const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
     const minDisp = -Math.max(2, Math.floor(p * .08));
@@ -229,57 +230,70 @@ function disparityWorkerMain() {
             postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
         }
     }
-    const aggregate = new Uint16Array(costs.length);
-    let prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
-    function addPath(startX, startY, dx, dy) {
-      let vx = startX, y = startY, first = true;
-      while (vx >= 0 && vx < validW && y >= 0 && y < h) {
-        const pi = y * validW + vx, off = pi * dispCount;
-        if (first) {
-          for (let di = 0; di < dispCount; di++) {
-            cur[di] = costs[off + di];
-            aggregate[off + di] += cur[di];
-          }
-          first = false;
-        } else {
-          let prevMin = prev[0];
-          for (let di = 1; di < dispCount; di++)
-            if (prev[di] < prevMin) prevMin = prev[di];
-          const px = xStart + vx - dx, py = y - dy;
-          const edge = Math.abs(gray[y * w + xStart + vx] - gray[py * w + px]);
-          const p1 = 2.2, p2 = Math.max(5, 18 - edge * .20);
-          for (let di = 0; di < dispCount; di++) {
-            let v = prev[di];
-            if (di > 0) v = Math.min(v, prev[di - 1] + p1);
-            if (di + 1 < dispCount) v = Math.min(v, prev[di + 1] + p1);
-            v = Math.min(v, prevMin + p2);
-            cur[di] = costs[off + di] + v - prevMin;
-            aggregate[off + di] =
-                Math.min(65535, aggregate[off + di] + Math.round(cur[di]));
-          }
-        }
-        // The next pixel only needs the just-computed vector. Swapping the two
-        // scratch buffers is equivalent to prev.set(cur), but avoids copying
-        // the complete disparity vector at every SGM step.
-        const swap = prev;
-        prev = cur;
-        cur = swap;
-        vx += dx;
-        y += dy;
+    let aggregate, usedGpuSgm = false;
+    if (usedGpuCosts && packedAggregateBuffer) {
+      const packed = new Uint32Array(packedAggregateBuffer),
+            expectedWords = Math.ceil(costs.length / 2);
+      if (packed.length === expectedWords) {
+        aggregate = new Uint16Array(costs.length);
+        for (let i = 0; i < aggregate.length; i++)
+          aggregate[i] =
+              (packed[i >> 1] >>> ((i & 1) * 16)) & 65535;
+        usedGpuSgm = true;
+        postProgress(id, .70, 'Распаковка WebGPU SGM…');
       }
     }
-    // Four SGM directions. Each path favours piecewise-smooth disparity but
-    // relaxes at image edges.
-    for (let y = 0; y < h; y++) {
-      addPath(0, y, 1, 0);
-      addPath(validW - 1, y, -1, 0);
+    if (!aggregate) {
+      aggregate = new Uint16Array(costs.length);
+      let prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
+      function addPath(startX, startY, dx, dy) {
+        let vx = startX, y = startY, first = true;
+        while (vx >= 0 && vx < validW && y >= 0 && y < h) {
+          const pi = y * validW + vx, off = pi * dispCount;
+          if (first) {
+            for (let di = 0; di < dispCount; di++) {
+              cur[di] = costs[off + di];
+              aggregate[off + di] += cur[di];
+            }
+            first = false;
+          } else {
+            let prevMin = prev[0];
+            for (let di = 1; di < dispCount; di++)
+              if (prev[di] < prevMin) prevMin = prev[di];
+            const px = xStart + vx - dx, py = y - dy;
+            const edge =
+                Math.abs(gray[y * w + xStart + vx] - gray[py * w + px]);
+            const p1 = 2.2, p2 = Math.max(5, 18 - edge * .20);
+            for (let di = 0; di < dispCount; di++) {
+              let v = prev[di];
+              if (di > 0) v = Math.min(v, prev[di - 1] + p1);
+              if (di + 1 < dispCount) v = Math.min(v, prev[di + 1] + p1);
+              v = Math.min(v, prevMin + p2);
+              cur[di] = costs[off + di] + v - prevMin;
+              aggregate[off + di] =
+                  Math.min(65535, aggregate[off + di] + Math.round(cur[di]));
+            }
+          }
+          const swap = prev;
+          prev = cur;
+          cur = swap;
+          vx += dx;
+          y += dy;
+        }
+      }
+      // Four SGM directions. Each path favours piecewise-smooth disparity but
+      // relaxes at image edges.
+      for (let y = 0; y < h; y++) {
+        addPath(0, y, 1, 0);
+        addPath(validW - 1, y, -1, 0);
+      }
+      postProgress(id, .48, 'SGM по горизонтали…');
+      for (let vx = 0; vx < validW; vx++) {
+        addPath(vx, 0, 0, 1);
+        addPath(vx, h - 1, 0, -1);
+      }
+      postProgress(id, .70, 'SGM по вертикали…');
     }
-    postProgress(id, .48, 'SGM по горизонтали…');
-    for (let vx = 0; vx < validW; vx++) {
-      addPath(vx, 0, 0, 1);
-      addPath(vx, h - 1, 0, -1);
-    }
-    postProgress(id, .70, 'SGM по вертикали…');
     let dispIndex = new Int16Array(pixels),
         reliability = new Float32Array(pixels);
     for (let y = 0; y < h; y++)
@@ -447,6 +461,7 @@ function disparityWorkerMain() {
           bgDepth,
           cropX,
           usedGpuCosts,
+          usedGpuSgm,
           processingMs: performance.now() - startedAt,
           rawDepth: rawDepth.buffer,
           confMap: confMap.buffer
@@ -1321,7 +1336,8 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
         cropX = m.cropX;
         console.info(
             `Depth worker: ${m.processingMs.toFixed(0)} ms ` +
-            `(${m.usedGpuCosts ? 'WebGPU costs' : 'CPU costs'})`);
+            `(${m.usedGpuSgm ? 'WebGPU SGM' :
+                               m.usedGpuCosts ? 'WebGPU costs' : 'CPU'})`);
         console.info(
             `Depth total: ${(performance.now() - totalStartedAt).toFixed(0)} ms`);
         worker.terminate();
@@ -1345,8 +1361,10 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
     const transfers = [grayCopy.buffer];
     if (gpuCosts) {
       message.packedCostsBuffer = gpuCosts.packedCosts;
+      message.packedAggregateBuffer = gpuCosts.packedAggregate;
       message.wordsPerPixel = gpuCosts.wordsPerPixel;
       transfers.push(gpuCosts.packedCosts);
+      if (gpuCosts.packedAggregate) transfers.push(gpuCosts.packedAggregate);
     }
     worker.postMessage(message, transfers);
   });

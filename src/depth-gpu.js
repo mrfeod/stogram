@@ -16,6 +16,18 @@ struct Params {
 @group(0) @binding(1) var<storage, read> gray: array<f32>;
 @group(0) @binding(2) var<storage, read_write> census: array<u32>;
 @group(0) @binding(3) var<storage, read_write> packedCosts: array<u32>;
+@group(0) @binding(4) var<storage, read_write> aggregate: array<u32>;
+@group(0) @binding(5) var<uniform> direction: vec4<i32>;
+@group(0) @binding(6) var<storage, read_write> packedAggregate: array<u32>;
+
+var<workgroup> pathPrev: array<f32, 96>;
+var<workgroup> pathCur: array<f32, 96>;
+var<workgroup> pathMin: f32;
+
+fn costAt(pi: i32, di: i32) -> u32 {
+  let word = packedCosts[pi * params.wordsPerPixel + di / 4];
+  return (word >> u32((di % 4) * 8)) & 255u;
+}
 
 @compute @workgroup_size(8, 8)
 fn makeCensus(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -71,6 +83,85 @@ fn makeCosts(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   packedCosts[wordIndex] = packed;
 }
+
+@compute @workgroup_size(96)
+fn aggregatePath(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>) {
+  let path = i32(group.x);
+  let di = i32(local.x);
+  let dir = direction.x;
+  let horizontal = dir < 2;
+  let length = select(params.h, params.validW, horizontal);
+  if ((!horizontal && path >= params.validW) ||
+      (horizontal && path >= params.h)) { return; }
+  for (var step = 0; step < length; step++) {
+    var vx = path;
+    var y = step;
+    if (horizontal) {
+      vx = select(params.validW - 1 - step, step, dir == 0);
+      y = path;
+    } else {
+      y = select(params.h - 1 - step, step, dir == 2);
+    }
+    let pi = y * params.validW + vx;
+    let off = pi * params.dispCount;
+    if (step > 0) {
+      if (di == 0) {
+        var minimum = pathPrev[0];
+        for (var candidate = 1; candidate < params.dispCount; candidate++) {
+          minimum = min(minimum, pathPrev[candidate]);
+        }
+        pathMin = minimum;
+      }
+      workgroupBarrier();
+    }
+    if (di < params.dispCount) {
+      let baseCost = f32(costAt(pi, di));
+      if (step == 0) {
+        pathCur[di] = baseCost;
+      } else {
+        var best = pathPrev[di];
+        if (di > 0) { best = min(best, pathPrev[di - 1] + 2.2); }
+        if (di + 1 < params.dispCount) {
+          best = min(best, pathPrev[di + 1] + 2.2);
+        }
+        var prevVx = vx;
+        var prevY = y;
+        if (horizontal) {
+          prevVx = select(vx + 1, vx - 1, dir == 0);
+        } else {
+          prevY = select(y + 1, y - 1, dir == 2);
+        }
+        let imageIndex = y * params.w + params.xStart + vx;
+        let previousIndex = prevY * params.w + params.xStart + prevVx;
+        let edge = abs(gray[imageIndex] - gray[previousIndex]);
+        let p2 = max(5.0, 18.0 - edge * 0.20);
+        best = min(best, pathMin + p2);
+        pathCur[di] = baseCost + best - pathMin;
+      }
+    }
+    workgroupBarrier();
+    if (di < params.dispCount) {
+      let addition = u32(floor(pathCur[di] + 0.5));
+      aggregate[off + di] = min(65535u, aggregate[off + di] + addition);
+      pathPrev[di] = pathCur[di];
+    }
+    workgroupBarrier();
+  }
+}
+
+@compute @workgroup_size(64)
+fn packAggregate(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let wordIndex = i32(gid.x);
+  let valueCount = params.validW * params.h * params.dispCount;
+  let first = wordIndex * 2;
+  if (first >= valueCount) { return; }
+  let low = min(65535u, aggregate[first]);
+  var high = 0u;
+  if (first + 1 < valueCount) { high = min(65535u, aggregate[first + 1]); }
+  packedAggregate[wordIndex] = low | (high << 16u);
+}
 `;
 
 async function createGpuState() {
@@ -87,7 +178,15 @@ async function createGpuState() {
     layout: 'auto',
     compute: {module, entryPoint: 'makeCosts'},
   });
-  return {device, censusPipeline, costPipeline};
+  const sgmPipeline = await device.createComputePipelineAsync({
+    layout: 'auto',
+    compute: {module, entryPoint: 'aggregatePath'},
+  });
+  const packPipeline = await device.createComputePipelineAsync({
+    layout: 'auto',
+    compute: {module, entryPoint: 'packAggregate'},
+  });
+  return {device, censusPipeline, costPipeline, sgmPipeline, packPipeline};
 }
 
 function gpuState() {
@@ -102,7 +201,7 @@ function storageBuffer(device, size, usage) {
 export async function computeCostVolumeGpu(gray, w, h, period) {
   const state = await gpuState();
   if (!state) return null;
-  const {device, censusPipeline, costPipeline} = state;
+  const {device, censusPipeline, costPipeline, sgmPipeline, packPipeline} = state;
   const minDisp = -Math.max(2, Math.floor(period * .08));
   const maxDisp = Math.max(4, Math.min(Math.floor(period * .34), 42));
   const dispCount = maxDisp - minDisp + 1;
@@ -112,14 +211,21 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   const pixels = validW * h;
   const wordsPerPixel = Math.ceil(dispCount / 4);
   const packedByteLength = pixels * wordsPerPixel * 4;
+  const aggregateValues = pixels * dispCount;
+  const packedAggregateByteLength = Math.ceil(aggregateValues / 2) * 4;
   const U = GPUBufferUsage;
   const paramsBuffer = storageBuffer(device, 32, U.UNIFORM | U.COPY_DST);
   const grayBuffer = storageBuffer(device, gray.byteLength, U.STORAGE | U.COPY_DST);
   const censusBuffer = storageBuffer(device, w * h * 4, U.STORAGE);
   const costsBuffer = storageBuffer(
       device, packedByteLength, U.STORAGE | U.COPY_SRC);
+  const aggregateBuffer = storageBuffer(device, aggregateValues * 4, U.STORAGE);
+  const packedAggregateBuffer = storageBuffer(
+      device, packedAggregateByteLength, U.STORAGE | U.COPY_SRC);
   const readBuffer = storageBuffer(
       device, packedByteLength, U.COPY_DST | U.MAP_READ);
+  const aggregateReadBuffer = storageBuffer(
+      device, packedAggregateByteLength, U.COPY_DST | U.MAP_READ);
   const params = new Int32Array([
     w, h, period, minDisp, dispCount, xStart, validW, wordsPerPixel,
   ]);
@@ -134,6 +240,11 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
     ...censusEntries,
     {binding: 3, resource: {buffer: costsBuffer}},
   ];
+  const directionBuffers = [0, 1, 2, 3].map(value => {
+    const buffer = storageBuffer(device, 16, U.UNIFORM | U.COPY_DST);
+    device.queue.writeBuffer(buffer, 0, new Int32Array([value, 0, 0, 0]));
+    return buffer;
+  });
   const startedAt = performance.now();
   const encoder = device.createCommandEncoder();
   let pass = encoder.beginComputePass();
@@ -150,14 +261,56 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   }));
   pass.dispatchWorkgroups(Math.ceil(pixels * wordsPerPixel / 64));
   pass.end();
+  if (dispCount <= 96) {
+    for (let dir = 0; dir < 4; dir++) {
+      const sgmEntries = [
+        {binding: 0, resource: {buffer: paramsBuffer}},
+        {binding: 1, resource: {buffer: grayBuffer}},
+        {binding: 3, resource: {buffer: costsBuffer}},
+        {binding: 4, resource: {buffer: aggregateBuffer}},
+        {binding: 5, resource: {buffer: directionBuffers[dir]}},
+      ];
+      pass = encoder.beginComputePass();
+      pass.setPipeline(sgmPipeline);
+      pass.setBindGroup(0, device.createBindGroup({
+        layout: sgmPipeline.getBindGroupLayout(0), entries: sgmEntries,
+      }));
+      pass.dispatchWorkgroups(dir < 2 ? h : validW);
+      pass.end();
+    }
+    const packEntries = [
+      {binding: 0, resource: {buffer: paramsBuffer}},
+      {binding: 4, resource: {buffer: aggregateBuffer}},
+      {binding: 6, resource: {buffer: packedAggregateBuffer}},
+    ];
+    pass = encoder.beginComputePass();
+    pass.setPipeline(packPipeline);
+    pass.setBindGroup(0, device.createBindGroup({
+      layout: packPipeline.getBindGroupLayout(0), entries: packEntries,
+    }));
+    pass.dispatchWorkgroups(Math.ceil(Math.ceil(aggregateValues / 2) / 64));
+    pass.end();
+    encoder.copyBufferToBuffer(
+        packedAggregateBuffer, 0, aggregateReadBuffer, 0,
+        packedAggregateByteLength);
+  }
   encoder.copyBufferToBuffer(costsBuffer, 0, readBuffer, 0, packedByteLength);
   device.queue.submit([encoder.finish()]);
-  await readBuffer.mapAsync(GPUMapMode.READ);
+  await Promise.all([
+    readBuffer.mapAsync(GPUMapMode.READ),
+    dispCount <= 96 ? aggregateReadBuffer.mapAsync(GPUMapMode.READ) :
+                      Promise.resolve(),
+  ]);
   const packedCosts = readBuffer.getMappedRange().slice(0);
+  const packedAggregate = dispCount <= 96 ?
+      aggregateReadBuffer.getMappedRange().slice(0) : null;
   readBuffer.unmap();
+  if (dispCount <= 96) aggregateReadBuffer.unmap();
   const processingMs = performance.now() - startedAt;
   for (const buffer of
-       [paramsBuffer, grayBuffer, censusBuffer, costsBuffer, readBuffer])
+       [paramsBuffer, grayBuffer, censusBuffer, costsBuffer, aggregateBuffer,
+        packedAggregateBuffer, readBuffer, aggregateReadBuffer,
+        ...directionBuffers])
     buffer.destroy();
-  return {packedCosts, wordsPerPixel, processingMs};
+  return {packedCosts, packedAggregate, wordsPerPixel, processingMs};
 }
