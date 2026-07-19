@@ -9,6 +9,11 @@ uniform float uUseDepthTex;
 out vec2 vSourceUV;
 out vec3 vNormal;
 out vec3 vWorldPos;
+flat out float vSurfaceKind;
+out float vWallT;
+out vec2 vSideNormal;
+out vec3 vLocalNormal;
+out float vLocalZ;
 vec3 rotate3(vec3 p){
   float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
@@ -72,6 +77,8 @@ void main(){
   else if(auxiliary) n=vec3(0.0,0.0,-1.0);
   else if(layerBack) n=vec3(0.0,0.0,-1.0);
   else n=normalize(vec3(-gradient.x*uDepthScale,-gradient.y*uDepthScale,1.0));
+  vLocalNormal=n;
+  vLocalZ=localZ;
   n=normalize(rotate3(n));
   float camDist=3.2;
   float cz=camDist-p.z;
@@ -82,6 +89,9 @@ void main(){
   float B=(2.0*farP*nearP)/(nearP-farP);
   gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
   vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
+  vSurfaceKind=side?1.0:((auxiliary||layerBack)?2.0:0.0);
+  vWallT=side&&aDepth<-2.5?1.0:0.0;
+  vSideNormal=side?aGradient:vec2(0.0);
   vNormal=n; vWorldPos=p;
 }`;
 
@@ -90,12 +100,53 @@ precision highp float;
 in vec2 vSourceUV;
 in vec3 vNormal;
 in vec3 vWorldPos;
+flat in float vSurfaceKind;
+in float vWallT;
+in vec2 vSideNormal;
+in vec3 vLocalNormal;
+in float vLocalZ;
 uniform sampler2D uSourceTex;
+uniform float uSourceAspect;
 layout(location=0) out vec4 outAlbedo;
 layout(location=1) out vec4 outNormal;
 layout(location=2) out vec4 outPosition;
+float mirrorRepeat(float value){
+  float wrapped=mod(value,2.0);
+  return 1.0-abs(wrapped-1.0);
+}
 void main(){
-  outAlbedo=vec4(texture(uSourceTex,clamp(vSourceUV,0.0,1.0)).rgb,1.0);
+  vec2 sourceUV=clamp(vSourceUV,0.0,1.0);
+  vec3 albedo;
+  if(vSurfaceKind>0.5&&vSurfaceKind<1.5){
+    float depthX=mirrorRepeat(vLocalZ*0.5);
+    float depthY=mirrorRepeat(
+        vLocalZ/(2.0*max(uSourceAspect,1e-5)));
+    vec3 projectedX=texture(
+        uSourceTex,vec2(depthX,sourceUV.y)).rgb;
+    vec3 projectedY=texture(
+        uSourceTex,vec2(sourceUV.x,depthY)).rgb;
+    vec2 wallWeights=abs(vSideNormal);
+    wallWeights/=max(wallWeights.x+wallWeights.y,1e-5);
+    vec3 projected=projectedX*wallWeights.x+projectedY*wallWeights.y;
+    vec3 edgeColor=texture(uSourceTex,sourceUV).rgb;
+    albedo=mix(edgeColor,projected,smoothstep(0.0,0.18,vWallT));
+  }else if(vSurfaceKind<0.5){
+    vec3 localNormal=normalize(vLocalNormal);
+    vec3 weights=pow(abs(localNormal),vec3(4.0));
+    weights/=max(weights.x+weights.y+weights.z,1e-5);
+    float depthX=mirrorRepeat(vLocalZ*0.5);
+    float depthY=mirrorRepeat(
+        vLocalZ/(2.0*max(uSourceAspect,1e-5)));
+    vec2 projectionX=vec2(depthX,sourceUV.y);
+    vec2 projectionY=vec2(sourceUV.x,depthY);
+    vec3 colorX=texture(uSourceTex,projectionX).rgb;
+    vec3 colorY=texture(uSourceTex,projectionY).rgb;
+    vec3 colorZ=texture(uSourceTex,sourceUV).rgb;
+    albedo=colorX*weights.x+colorY*weights.y+colorZ*weights.z;
+  }else{
+    albedo=texture(uSourceTex,sourceUV).rgb;
+  }
+  outAlbedo=vec4(albedo,1.0);
   outNormal=vec4(normalize(vNormal)*0.5+0.5,1.0);
   outPosition=vec4(vWorldPos,1.0);
 }`;
