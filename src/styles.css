@@ -269,15 +269,10 @@
       padding: 0;
       display: grid;
       place-items: center;
-      font-size: 22px;
+      font-size: 12px;
+      font-weight: 700;
       line-height: 1;
-      font-family: "Segoe UI Symbol", "Apple Symbols", sans-serif
-    }
-
-    #downloadDepth span {
-      display: block;
-      line-height: 1;
-      transform: translateY(-1px)
+      font-family: inherit
     }
 
     #downloadDepth[hidden] {
