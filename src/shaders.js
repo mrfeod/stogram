@@ -3,7 +3,7 @@ precision highp float;
 layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec2 aGradient;
-uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uPatternTime;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uPatternTime,uBackPass;
 uniform sampler2D uDepthTex;
 uniform float uUseDepthTex;
 out vec2 vSourceUV;
@@ -72,10 +72,15 @@ void main(){
   bool side=auxiliary&&aDepth<-1.5;
   bool forcedBase=auxiliary&&(aDepth>-1.5||aDepth<-2.5);
   if(forcedBase) depth=0.0;
-  vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
+  bool layerBack=uUseDepthTex<0.5&&uBackPass>0.5;
+  float localZ=depth*(uUseDepthTex<0.5?max(uDepthScale,0.01):uDepthScale);
+  if(forcedBase) localZ=-0.0025;
+  if(layerBack) localZ-=0.00025;
+  vec3 p=rotate3(vec3(aXY,localZ));
   vec3 n;
   if(side) n=normalize(vec3(aGradient,0.0));
   else if(auxiliary) n=vec3(0.0,0.0,-1.0);
+  else if(layerBack) n=vec3(0.0,0.0,-1.0);
   else n=normalize(vec3(-gradient.x*uDepthScale,-gradient.y*uDepthScale,1.0));
   n=normalize(rotate3(n));
   float camDist=3.2;
@@ -112,7 +117,7 @@ layout(location=1) in float aDepth;
 uniform float uYaw,uPitch,uDepthScale,uSign;
 uniform mat4 uLightVP;
 uniform sampler2D uDepthTex;
-uniform float uUseDepthTex,uSourceCrop,uSourceAspect,uPatternTime;
+uniform float uUseDepthTex,uSourceCrop,uSourceAspect,uPatternTime,uBackPass;
 vec3 rotate3(vec3 p){
   float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
@@ -156,7 +161,11 @@ void main(){
   bool auxiliary=uUseDepthTex>0.5&&aDepth<-0.5;
   bool forcedBase=auxiliary&&(aDepth>-1.5||aDepth<-2.5);
   if(forcedBase) depth=0.0;
-  vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
+  bool layerBack=uUseDepthTex<0.5&&uBackPass>0.5;
+  float localZ=depth*(uUseDepthTex<0.5?max(uDepthScale,0.01):uDepthScale);
+  if(forcedBase) localZ=-0.0025;
+  if(layerBack) localZ-=0.00025;
+  vec3 p=rotate3(vec3(aXY,localZ));
   gl_Position=uLightVP*vec4(p,1.0);
 }`;
 

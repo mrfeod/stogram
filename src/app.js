@@ -671,7 +671,8 @@ const GU = {
   useDepthTex: gl.getUniformLocation(gProg, 'uUseDepthTex'),
   sourceCrop: gl.getUniformLocation(gProg, 'uSourceCrop'),
   sourceAspect: gl.getUniformLocation(gProg, 'uSourceAspect'),
-  patternTime: gl.getUniformLocation(gProg, 'uPatternTime')
+  patternTime: gl.getUniformLocation(gProg, 'uPatternTime'),
+  backPass: gl.getUniformLocation(gProg, 'uBackPass')
 };
 const SU = {
   yaw: gl.getUniformLocation(shadowProg, 'uYaw'),
@@ -683,7 +684,8 @@ const SU = {
   useDepthTex: gl.getUniformLocation(shadowProg, 'uUseDepthTex'),
   sourceCrop: gl.getUniformLocation(shadowProg, 'uSourceCrop'),
   sourceAspect: gl.getUniformLocation(shadowProg, 'uSourceAspect'),
-  patternTime: gl.getUniformLocation(shadowProg, 'uPatternTime')
+  patternTime: gl.getUniformLocation(shadowProg, 'uPatternTime'),
+  backPass: gl.getUniformLocation(shadowProg, 'uBackPass')
 };
 const LU = {
   albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'),
@@ -880,7 +882,9 @@ function updateMeshBoundsFromVerts(verts) {
 function computeLightVP() {
   const d = lightDirCameraSpace();
   const L = vec3Norm(d.x, d.y, d.z);
-  const scale = (+depthR.value || 0) / 100;
+  const requestedScale = (+depthR.value || 0) / 100;
+  const scale = currentViewMode() === 'layers' ?
+      Math.max(0.01, requestedScale) : requestedScale;
   const sign = currentShape();
   const b = meshSourceBounds;
   let minDepth, maxDepth;
@@ -967,11 +971,16 @@ function renderShadowMap(lightVP) {
   gl.uniform1f(SU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(SU.sourceAspect, mapH / Math.max(1, mapW - cropX));
   gl.uniform1f(SU.patternTime, voidPatternTime);
+  gl.uniform1f(SU.backPass, 0);
   gl.activeTexture(gl.TEXTURE5);
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.uniform1i(SU.depthTex, 5);
   gl.uniformMatrix4fv(SU.lightVP, false, lightVP);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+  if (!surfaceUsesDepthTexture && currentViewMode() === 'layers') {
+    gl.uniform1f(SU.backPass, 1);
+    gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+  }
   gl.bindVertexArray(null);
   gl.colorMask(true, true, true, true);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -994,6 +1003,7 @@ function renderGBuffer() {
   gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
   gl.uniform1f(GU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
   gl.uniform1f(GU.patternTime, voidPatternTime);
+  gl.uniform1f(GU.backPass, 0);
   gl.activeTexture(gl.TEXTURE4);
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.uniform1i(GU.sourceTex, 4);
@@ -1001,6 +1011,10 @@ function renderGBuffer() {
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.uniform1i(GU.depthTex, 5);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+  if (!surfaceUsesDepthTexture && currentViewMode() === 'layers') {
+    gl.uniform1f(GU.backPass, 1);
+    gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
+  }
   gl.bindVertexArray(null);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
@@ -1550,7 +1564,7 @@ function buildMesh() {
       for (let gy = 0; gy < ny; gy++) {
         const y = ys[gy];
         for (let gx = 0; gx < nx; gx++) {
-          const x = xs[gx], src = y * mapW + x;
+          const x = xs[gx];
           verts[vo++] = (x - centerX) / visibleW * 2;
           verts[vo++] = (mapH * .5 - y) / visibleW * 2;
           verts[vo++] = level;
@@ -1561,9 +1575,11 @@ function buildMesh() {
       const mask = masks[li];
       for (let y = 0; y < ny - 1; y++)
         for (let x = 0; x < nx - 1; x++) {
-          const a = baseVertex + y * nx + x, b = a + 1, c = a + nx, d = c + 1;
+          const a = baseVertex + y * nx + x, b = a + 1,
+                c = a + nx, d = c + 1;
           const m00 = mask[y * nx + x], m10 = mask[y * nx + x + 1],
-                m01 = mask[(y + 1) * nx + x], m11 = mask[(y + 1) * nx + x + 1];
+                m01 = mask[(y + 1) * nx + x],
+                m11 = mask[(y + 1) * nx + x + 1];
           if (m00 && m01 && m10) {
             indices[iq++] = a;
             indices[iq++] = c;
