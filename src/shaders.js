@@ -3,7 +3,7 @@ precision highp float;
 layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec2 aGradient;
-uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uPatternTime;
 uniform sampler2D uDepthTex;
 uniform float uUseDepthTex;
 out vec2 vSourceUV;
@@ -14,19 +14,53 @@ vec3 rotate3(vec3 p){
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
   return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
 }
+vec2 cellHash(vec2 p){
+  return fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453);
+}
+float livingVoronoi(vec2 uv){
+  vec2 size=vec2(textureSize(uDepthTex,0));
+  vec2 p=uv*size/32.0, cell=floor(p), local=fract(p);
+  float nearest=10.0;
+  for(int yy=-1;yy<=1;yy++) for(int xx=-1;xx<=1;xx++){
+    vec2 neighbour=vec2(float(xx),float(yy));
+    vec2 seed=cellHash(cell+neighbour);
+    vec2 motion=sin(uPatternTime*0.7+seed*6.2831853)*0.28;
+    vec2 point=neighbour+0.5+motion;
+    nearest=min(nearest,length(point-local));
+  }
+  return 1.0-smoothstep(0.08,0.72,nearest);
+}
+float depthWithVoidPattern(vec2 uv,float sourceDepth){
+  vec2 size=vec2(textureSize(uDepthTex,0)), pixel=uv*size;
+  float left=uSourceCrop*size.x;
+  bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
+      pixel.y<=1.0||pixel.y>=size.y-1.0;
+  if(border) return 0.0;
+  if(sourceDepth>0.00001) return sourceDepth;
+  return (5.0+5.0*livingVoronoi(uv))/255.0;
+}
+float signedMeshDepth(vec2 uv,float sourceDepth){
+  float meshDepth=depthWithVoidPattern(uv,sourceDepth);
+  if(meshDepth<=0.00001) return 0.0;
+  return sourceDepth>0.00001&&uSign<0.0?1.0-meshDepth:meshDepth;
+}
 void main(){
   vec2 depthUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
   vec2 texel=1.0/vec2(textureSize(uDepthTex,0));
-  float dL=texture(uDepthTex,depthUV-vec2(texel.x,0.0)).r;
-  float dR=texture(uDepthTex,depthUV+vec2(texel.x,0.0)).r;
-  float dU=texture(uDepthTex,depthUV-vec2(0.0,texel.y)).r;
-  float dD=texture(uDepthTex,depthUV+vec2(0.0,texel.y)).r;
+  vec2 uvL=depthUV-vec2(texel.x,0.0), uvR=depthUV+vec2(texel.x,0.0);
+  vec2 uvU=depthUV-vec2(0.0,texel.y), uvD=depthUV+vec2(0.0,texel.y);
+  float dL=signedMeshDepth(uvL,texture(uDepthTex,uvL).r);
+  float dR=signedMeshDepth(uvR,texture(uDepthTex,uvR).r);
+  float dU=signedMeshDepth(uvU,texture(uDepthTex,uvU).r);
+  float dD=signedMeshDepth(uvD,texture(uDepthTex,uvD).r);
   float sampledDepth=texture(uDepthTex,depthUV).r;
-  float depth=mix(aDepth,sampledDepth,uUseDepthTex);
+  sampledDepth=signedMeshDepth(depthUV,sampledDepth);
+  float cpuDepth=uSign<0.0?1.0-aDepth:aDepth;
+  float depth=mix(cpuDepth,sampledDepth,uUseDepthTex);
   vec2 sampledGradient=vec2(dR-dL,dD-dU)*float(textureSize(uDepthTex,0).x)*0.23;
-  vec2 gradient=mix(aGradient,sampledGradient,uUseDepthTex);
-  vec3 p=rotate3(vec3(aXY,depth*uDepthScale*uSign));
-  vec3 n=normalize(vec3(-gradient.x*uDepthScale*uSign,-gradient.y*uDepthScale*uSign,1.0));
+  vec2 gradient=mix(aGradient*uSign,sampledGradient,uUseDepthTex);
+  vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
+  vec3 n=normalize(vec3(-gradient.x*uDepthScale,-gradient.y*uDepthScale,1.0));
   n=normalize(rotate3(n));
   float camDist=3.2;
   float cz=camDist-p.z;
@@ -62,16 +96,48 @@ layout(location=1) in float aDepth;
 uniform float uYaw,uPitch,uDepthScale,uSign;
 uniform mat4 uLightVP;
 uniform sampler2D uDepthTex;
-uniform float uUseDepthTex,uSourceCrop,uSourceAspect;
+uniform float uUseDepthTex,uSourceCrop,uSourceAspect,uPatternTime;
 vec3 rotate3(vec3 p){
   float cy=cos(uYaw), sy=sin(uYaw), cp=cos(uPitch), sp=sin(uPitch);
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
   return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
 }
+vec2 cellHash(vec2 p){
+  return fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453);
+}
+float livingVoronoi(vec2 uv){
+  vec2 size=vec2(textureSize(uDepthTex,0));
+  vec2 p=uv*size/32.0, cell=floor(p), local=fract(p);
+  float nearest=10.0;
+  for(int yy=-1;yy<=1;yy++) for(int xx=-1;xx<=1;xx++){
+    vec2 neighbour=vec2(float(xx),float(yy));
+    vec2 seed=cellHash(cell+neighbour);
+    vec2 motion=sin(uPatternTime*0.7+seed*6.2831853)*0.28;
+    nearest=min(nearest,length(neighbour+0.5+motion-local));
+  }
+  return 1.0-smoothstep(0.08,0.72,nearest);
+}
+float depthWithVoidPattern(vec2 uv,float sourceDepth){
+  vec2 size=vec2(textureSize(uDepthTex,0)), pixel=uv*size;
+  float left=uSourceCrop*size.x;
+  bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
+      pixel.y<=1.0||pixel.y>=size.y-1.0;
+  if(border) return 0.0;
+  if(sourceDepth>0.00001) return sourceDepth;
+  return (5.0+5.0*livingVoronoi(uv))/255.0;
+}
+float signedMeshDepth(vec2 uv,float sourceDepth){
+  float meshDepth=depthWithVoidPattern(uv,sourceDepth);
+  if(meshDepth<=0.00001) return 0.0;
+  return sourceDepth>0.00001&&uSign<0.0?1.0-meshDepth:meshDepth;
+}
 void main(){
   vec2 uv=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
-  float depth=mix(aDepth,texture(uDepthTex,uv).r,uUseDepthTex);
-  vec3 p=rotate3(vec3(aXY,depth*uDepthScale*uSign));
+  float sampledDepth=texture(uDepthTex,uv).r;
+  sampledDepth=signedMeshDepth(uv,sampledDepth);
+  float cpuDepth=uSign<0.0?1.0-aDepth:aDepth;
+  float depth=mix(cpuDepth,sampledDepth,uUseDepthTex);
+  vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
   gl_Position=uLightVP*vec4(p,1.0);
 }`;
 

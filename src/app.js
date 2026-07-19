@@ -40,6 +40,7 @@ let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
 const activePointers = new Map();
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
+let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0;
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
@@ -669,7 +670,8 @@ const GU = {
   depthTex: gl.getUniformLocation(gProg, 'uDepthTex'),
   useDepthTex: gl.getUniformLocation(gProg, 'uUseDepthTex'),
   sourceCrop: gl.getUniformLocation(gProg, 'uSourceCrop'),
-  sourceAspect: gl.getUniformLocation(gProg, 'uSourceAspect')
+  sourceAspect: gl.getUniformLocation(gProg, 'uSourceAspect'),
+  patternTime: gl.getUniformLocation(gProg, 'uPatternTime')
 };
 const SU = {
   yaw: gl.getUniformLocation(shadowProg, 'uYaw'),
@@ -680,7 +682,8 @@ const SU = {
   depthTex: gl.getUniformLocation(shadowProg, 'uDepthTex'),
   useDepthTex: gl.getUniformLocation(shadowProg, 'uUseDepthTex'),
   sourceCrop: gl.getUniformLocation(shadowProg, 'uSourceCrop'),
-  sourceAspect: gl.getUniformLocation(shadowProg, 'uSourceAspect')
+  sourceAspect: gl.getUniformLocation(shadowProg, 'uSourceAspect'),
+  patternTime: gl.getUniformLocation(shadowProg, 'uPatternTime')
 };
 const LU = {
   albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'),
@@ -950,6 +953,7 @@ function renderShadowMap(lightVP) {
   gl.uniform1f(SU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
   gl.uniform1f(SU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(SU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+  gl.uniform1f(SU.patternTime, voidPatternTime);
   gl.activeTexture(gl.TEXTURE5);
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.uniform1i(SU.depthTex, 5);
@@ -977,6 +981,7 @@ function renderGBuffer() {
   gl.uniform1f(GU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
   gl.uniform1f(GU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
+  gl.uniform1f(GU.patternTime, voidPatternTime);
   gl.activeTexture(gl.TEXTURE4);
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.uniform1i(GU.sourceTex, 4);
@@ -1022,6 +1027,12 @@ function frame(now) {
     autoTime += dt * 0.001;
     yaw = autoBaseYaw + Math.sin(autoTime * 0.72) * 0.55;
     pitch = autoBasePitch + Math.sin(autoTime * 0.41) * 0.14;
+    dirty = true;
+  }
+  if (processedDepth && surfaceUsesDepthTexture &&
+      now - lastVoidPatternFrame >= 1000 / 24) {
+    lastVoidPatternFrame = now;
+    voidPatternTime = now * .001;
     dirty = true;
   }
   if (dirty) {
