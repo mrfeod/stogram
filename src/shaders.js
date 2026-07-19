@@ -114,6 +114,16 @@ float mirrorRepeat(float value){
   float wrapped=mod(value,2.0);
   return 1.0-abs(wrapped-1.0);
 }
+vec3 sampleSource(vec2 uv){
+  vec2 texel=1.0/vec2(textureSize(uSourceTex,0));
+  vec3 center=texture(uSourceTex,uv).rgb;
+  vec3 neighbours=(
+      texture(uSourceTex,uv+vec2(texel.x,0.0)).rgb+
+      texture(uSourceTex,uv-vec2(texel.x,0.0)).rgb+
+      texture(uSourceTex,uv+vec2(0.0,texel.y)).rgb+
+      texture(uSourceTex,uv-vec2(0.0,texel.y)).rgb)*0.25;
+  return clamp(center+(center-neighbours)*0.38,0.0,1.0);
+}
 void main(){
   vec2 sourceUV=clamp(vSourceUV,0.0,1.0);
   vec3 albedo;
@@ -121,14 +131,12 @@ void main(){
     float depthX=mirrorRepeat(vLocalZ*0.5);
     float depthY=mirrorRepeat(
         vLocalZ/(2.0*max(uSourceAspect,1e-5)));
-    vec3 projectedX=texture(
-        uSourceTex,vec2(depthX,sourceUV.y)).rgb;
-    vec3 projectedY=texture(
-        uSourceTex,vec2(sourceUV.x,depthY)).rgb;
+    vec3 projectedX=sampleSource(vec2(depthX,sourceUV.y));
+    vec3 projectedY=sampleSource(vec2(sourceUV.x,depthY));
     vec2 wallWeights=abs(vSideNormal);
     wallWeights/=max(wallWeights.x+wallWeights.y,1e-5);
     vec3 projected=projectedX*wallWeights.x+projectedY*wallWeights.y;
-    vec3 edgeColor=texture(uSourceTex,sourceUV).rgb;
+    vec3 edgeColor=sampleSource(sourceUV);
     albedo=mix(edgeColor,projected,smoothstep(0.0,0.18,vWallT));
   }else if(vSurfaceKind<0.5){
     vec3 localNormal=normalize(vLocalNormal);
@@ -139,12 +147,12 @@ void main(){
         vLocalZ/(2.0*max(uSourceAspect,1e-5)));
     vec2 projectionX=vec2(depthX,sourceUV.y);
     vec2 projectionY=vec2(sourceUV.x,depthY);
-    vec3 colorX=texture(uSourceTex,projectionX).rgb;
-    vec3 colorY=texture(uSourceTex,projectionY).rgb;
-    vec3 colorZ=texture(uSourceTex,sourceUV).rgb;
+    vec3 colorX=sampleSource(projectionX);
+    vec3 colorY=sampleSource(projectionY);
+    vec3 colorZ=sampleSource(sourceUV);
     albedo=colorX*weights.x+colorY*weights.y+colorZ*weights.z;
   }else{
-    albedo=texture(uSourceTex,sourceUV).rgb;
+    albedo=sampleSource(sourceUV);
   }
   outAlbedo=vec4(albedo,1.0);
   outNormal=vec4(normalize(vNormal)*0.5+0.5,1.0);
