@@ -527,8 +527,9 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
       device, pixels * 4, U.STORAGE | U.COPY_SRC);
   const packedDisparityBuffer = storageBuffer(
       device, packedDisparityByteLength, U.STORAGE | U.COPY_SRC);
-  const readBuffer = storageBuffer(
-      device, packedByteLength, U.COPY_DST | U.MAP_READ);
+  const needsCostReadback = dispCount > 96;
+  const readBuffer = needsCostReadback ? storageBuffer(
+      device, packedByteLength, U.COPY_DST | U.MAP_READ) : null;
   const disparityReadBuffer = storageBuffer(
       device, packedDisparityByteLength, U.COPY_DST | U.MAP_READ);
   const reliabilityReadBuffer = storageBuffer(
@@ -636,21 +637,22 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
     encoder.copyBufferToBuffer(
         reliabilityB, 0, reliabilityReadBuffer, 0, pixels * 4);
   }
-  encoder.copyBufferToBuffer(costsBuffer, 0, readBuffer, 0, packedByteLength);
+  if (needsCostReadback)
+    encoder.copyBufferToBuffer(costsBuffer, 0, readBuffer, 0, packedByteLength);
   device.queue.submit([encoder.finish()]);
   await Promise.all([
-    readBuffer.mapAsync(GPUMapMode.READ),
+    needsCostReadback ? readBuffer.mapAsync(GPUMapMode.READ) : Promise.resolve(),
     dispCount <= 96 ? disparityReadBuffer.mapAsync(GPUMapMode.READ) :
                       Promise.resolve(),
     dispCount <= 96 ? reliabilityReadBuffer.mapAsync(GPUMapMode.READ) :
                       Promise.resolve(),
   ]);
-  const packedCosts = readBuffer.getMappedRange().slice(0);
+  const packedCosts = needsCostReadback ? readBuffer.getMappedRange().slice(0) : null;
   const packedDisparity = dispCount <= 96 ?
       disparityReadBuffer.getMappedRange().slice(0) : null;
   const reliability = dispCount <= 96 ?
       reliabilityReadBuffer.getMappedRange().slice(0) : null;
-  readBuffer.unmap();
+  if (needsCostReadback) readBuffer.unmap();
   if (dispCount <= 96) {
     disparityReadBuffer.unmap();
     reliabilityReadBuffer.unmap();
@@ -659,10 +661,11 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   for (const buffer of
        [paramsBuffer, grayBuffer, censusBuffer, costsBuffer, aggregateBuffer,
         disparityA, reliabilityA, disparityB, reliabilityB,
-        packedDisparityBuffer, readBuffer, disparityReadBuffer,
+        packedDisparityBuffer, disparityReadBuffer,
         reliabilityReadBuffer,
         ...directionBuffers])
     buffer.destroy();
+  if (readBuffer) readBuffer.destroy();
   return {
     packedCosts, packedDisparity, reliability, wordsPerPixel, processingMs,
   };
@@ -720,7 +723,6 @@ export async function filterDepthMapGpu(
   const resultBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_SRC);
   const histogramRead = makeBuffer(256 * 4, U.COPY_DST | U.MAP_READ);
   const resultRead = makeBuffer(byteLength, U.COPY_DST | U.MAP_READ);
-  const coverageRead = makeBuffer(byteLength, U.COPY_DST | U.MAP_READ);
   device.queue.writeBuffer(rawBuffer, 0, rawDepth);
   device.queue.writeBuffer(confidenceBuffer, 0, confidence);
   const paramsBuffers = [0, 1].map(phase => {
@@ -835,19 +837,14 @@ export async function filterDepthMapGpu(
   pass.dispatchWorkgroups(Math.ceil(count / 64));
   pass.end();
   finalEncoder.copyBufferToBuffer(resultBuffer, 0, resultRead, 0, byteLength);
-  finalEncoder.copyBufferToBuffer(coverageBuffer, 0, coverageRead, 0, byteLength);
   device.queue.submit([finalEncoder.finish()]);
-  await Promise.all([
-    resultRead.mapAsync(GPUMapMode.READ), coverageRead.mapAsync(GPUMapMode.READ),
-  ]);
+  await resultRead.mapAsync(GPUMapMode.READ);
   const depth = new Float32Array(resultRead.getMappedRange().slice(0));
-  const coverage = new Float32Array(coverageRead.getMappedRange().slice(0));
   resultRead.unmap();
-  coverageRead.unmap();
   for (const buffer of [
     rawBuffer, confidenceBuffer, depthA, depthB, maskA, maskB, coverageBuffer,
-    histogramBuffer, resultBuffer, histogramRead, resultRead, coverageRead,
+    histogramBuffer, resultBuffer, histogramRead, resultRead,
     contrastParams, ...paramsBuffers,
   ]) buffer.destroy();
-  return {depth, coverage, processingMs: performance.now() - startedAt};
+  return {depth, processingMs: performance.now() - startedAt};
 }

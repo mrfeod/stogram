@@ -148,8 +148,23 @@ function disparityWorkerMain() {
     const xStart = p - minDisp + 2, xEnd = w - 3,
           validW = Math.max(1, xEnd - xStart);
     const pixels = validW * h;
+    let dispIndex, reliability, usedGpuIcm = false, usedGpuSgm = false;
+    if (packedDisparityBuffer && reliabilityBuffer) {
+      const packed = new Uint32Array(packedDisparityBuffer),
+            gpuReliability = new Float32Array(reliabilityBuffer);
+      if (packed.length === Math.ceil(pixels / 2) &&
+          gpuReliability.length === pixels) {
+        dispIndex = new Int16Array(pixels);
+        for (let i = 0; i < pixels; i++)
+          dispIndex[i] = (packed[i >> 1] >>> ((i & 1) * 16)) & 65535;
+        reliability = gpuReliability;
+        usedGpuIcm = true;
+        usedGpuSgm = true;
+        postProgress(id, .78, 'Распаковка WebGPU disparity…');
+      }
+    }
     let costs, usedGpuCosts = false;
-    if (packedCostsBuffer && wordsPerPixel > 0) {
+    if (!dispIndex && packedCostsBuffer && wordsPerPixel > 0) {
       const packed = new Uint32Array(packedCostsBuffer);
       costs = new Uint8Array(pixels * dispCount);
       for (let pi = 0; pi < pixels; pi++) {
@@ -199,7 +214,7 @@ function disparityWorkerMain() {
         postProgress(id, .10, 'Проверка WebGPU не пройдена, CPU fallback…');
       }
     }
-    if (!costs) {
+    if (!dispIndex && !costs) {
       const census = new Uint32Array(w * h);
       // 5x5 Census descriptor: local ordering is much less sensitive to the
       // source texture brightness.
@@ -230,21 +245,6 @@ function disparityWorkerMain() {
           if ((y & 63) === 0 && vx === 0)
             postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
         }
-    }
-    let dispIndex, reliability, usedGpuIcm = false, usedGpuSgm = false;
-    if (usedGpuCosts && packedDisparityBuffer && reliabilityBuffer) {
-      const packed = new Uint32Array(packedDisparityBuffer),
-            gpuReliability = new Float32Array(reliabilityBuffer);
-      if (packed.length === Math.ceil(pixels / 2) &&
-          gpuReliability.length === pixels) {
-        dispIndex = new Int16Array(pixels);
-        for (let i = 0; i < pixels; i++)
-          dispIndex[i] = (packed[i >> 1] >>> ((i & 1) * 16)) & 65535;
-        reliability = gpuReliability;
-        usedGpuIcm = true;
-        usedGpuSgm = true;
-        postProgress(id, .78, 'Распаковка WebGPU disparity…');
-      }
     }
     if (!dispIndex) {
     let aggregate;
@@ -1374,7 +1374,9 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
       hideProgress();
       reject(err);
     };
-    const grayCopy = gray.slice();
+    const hasGpuDisparity = Boolean(
+        gpuCosts?.packedDisparity && gpuCosts?.reliability);
+    const grayCopy = hasGpuDisparity ? new Float32Array(0) : gray.slice();
     const message = {id: job, grayBuffer: grayCopy.buffer, w, h, p};
     const transfers = [grayCopy.buffer];
     if (gpuCosts) {
@@ -1382,7 +1384,7 @@ async function recoverDepth(gray, w, h, p, existingJob = null) {
       message.packedDisparityBuffer = gpuCosts.packedDisparity;
       message.reliabilityBuffer = gpuCosts.reliability;
       message.wordsPerPixel = gpuCosts.wordsPerPixel;
-      transfers.push(gpuCosts.packedCosts);
+      if (gpuCosts.packedCosts) transfers.push(gpuCosts.packedCosts);
       if (gpuCosts.packedDisparity) transfers.push(gpuCosts.packedDisparity);
       if (gpuCosts.reliability) transfers.push(gpuCosts.reliability);
     }
@@ -1401,9 +1403,7 @@ function reprocess(onDone = null) {
       if (onDone) onDone();
       return;
     }
-    const sigma = ANALYSIS_SIGMA;
-    processedDepth = loadedDepthMap ? rawDepth.slice() :
-                                      gaussianBlur(rawDepth, mapW, mapH, sigma);
+    processedDepth = rawDepth.slice();
     let gpuFiltered = null;
     if (!loadedDepthMap && confMap) {
       try {
@@ -1416,6 +1416,8 @@ function reprocess(onDone = null) {
         console.warn('WebGPU depth filtering unavailable, using CPU:', err);
       }
     }
+    if (!loadedDepthMap && !gpuFiltered)
+      processedDepth = gaussianBlur(rawDepth, mapW, mapH, ANALYSIS_SIGMA);
     rebuildDepthPreview(gpuFiltered);
     buildMesh();
     sched();
@@ -1916,7 +1918,7 @@ function rebuildDepthPreview(gpuFiltered = null) {
   const w = mapW, h = mapH, shape = currentShape();
   if (gpuFiltered && gpuFiltered.depth.length === w * h) {
     cleanDepthMap = gpuFiltered.depth;
-    depthCoverage = gpuFiltered.coverage;
+    depthCoverage = null;
     const srcW = Math.max(1, w - cropX);
     depthPreviewW = srcW;
     depthPreviewH = h;
