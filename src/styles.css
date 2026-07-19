@@ -284,6 +284,27 @@
       display: none
     }
 
+    #meshDownloads {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      display: flex;
+      gap: 6px
+    }
+
+    #meshDownloads button {
+      height: 42px;
+      min-width: 42px;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 700
+    }
+
+    #meshDownloads[hidden] {
+      display: none
+    }
+
     #drop {
       position: absolute;
       inset: 22px;

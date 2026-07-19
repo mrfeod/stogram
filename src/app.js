@@ -9,7 +9,8 @@ const cv = $('#view'), depthCv = $('#depthView'),
       stage = cv.parentElement,
       progressOverlay = $('#progressOverlay'),
       progressText = $('#progressText'), progressBar = $('#progressBar');
-const downloadDepthBtn = $('#downloadDepth');
+const downloadDepthBtn = $('#downloadDepth'),
+      meshDownloads = $('#meshDownloads'), downloadStlBtn = $('#downloadStl');
 const depthR = $('#depth'), depthN = $('#depthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
 const periodR = $('#period'), periodN = $('#periodNum');
@@ -1081,6 +1082,8 @@ function updateLayerUi() {
   depthCv.style.display = depthMode ? 'block' : 'none';
   downloadDepthBtn.hidden = !depthMode;
   downloadDepthBtn.disabled = !depthPreview;
+  meshDownloads.hidden = mode !== 'surface';
+  downloadStlBtn.disabled = !processedDepth;
   depthR.parentElement.classList.toggle('disabled', depthMode);
 }
 updateLayerUi();
@@ -1522,6 +1525,7 @@ function reprocess(onDone = null) {
 
 function buildMesh() {
   if (!processedDepth) return;
+  downloadStlBtn.disabled = false;
   const mode = currentViewMode();
   const stepPx = MESH_STEP_PX;
   const xs = axisValues(cropX, mapW, stepPx), ys = axisValues(0, mapH, stepPx);
@@ -2226,6 +2230,101 @@ downloadDepthBtn.onclick = () => {
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, 'image/png');
+};
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function makeSurfaceExportGeometry() {
+  if (!processedDepth || !mapW || !mapH) return null;
+  const source = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
+      cleanDepthMap : processedDepth;
+  let surface = meshDepthBlurCache.get(source);
+  if (!surface) {
+    surface = gaussianBlur(source, mapW, mapH, 2.0);
+    meshDepthBlurCache.set(source, surface);
+  }
+  const xs = axisValues(cropX, mapW, MESH_STEP_PX),
+        ys = axisValues(0, mapH, MESH_STEP_PX), nx = xs.length, ny = ys.length,
+        visibleW = Math.max(1, mapW - 1 - cropX),
+        centerX = (cropX + mapW - 1) * .5,
+        scale = (+depthR.value || 0) / 100, inverted = currentShape() < 0,
+        vertices = new Array(nx * ny);
+  for (let gy = 0; gy < ny; gy++)
+    for (let gx = 0; gx < nx; gx++) {
+      const x = xs[gx], y = ys[gy], value = surface[y * mapW + x];
+      vertices[gy * nx + gx] = {
+        x: (x - centerX) / visibleW * 2,
+        y: (mapH * .5 - y) / visibleW * 2,
+        z: (inverted ? 1 - value : value) * scale,
+      };
+    }
+  const triangles = [];
+  for (let y = 0; y < ny - 1; y++)
+    for (let x = 0; x < nx - 1; x++) {
+      const a = y * nx + x, b = a + 1, c = a + nx, d = c + 1;
+      triangles.push([vertices[a], vertices[c], vertices[b]]);
+      triangles.push([vertices[b], vertices[c], vertices[d]]);
+    }
+  const perimeter = [];
+  for (let x = 0; x < nx; x++) perimeter.push(x);
+  for (let y = 1; y < ny; y++) perimeter.push(y * nx + nx - 1);
+  for (let x = nx - 2; x >= 0; x--) perimeter.push((ny - 1) * nx + x);
+  for (let y = ny - 2; y > 0; y--) perimeter.push(y * nx);
+  const baseZ = -.0025;
+  for (let i = 0; i < perimeter.length; i++) {
+    const a = vertices[perimeter[i]], b = vertices[perimeter[(i + 1) % perimeter.length]],
+          ba = {x: a.x, y: a.y, z: baseZ},
+          bb = {x: b.x, y: b.y, z: baseZ};
+    // The perimeter is clockwise when viewed from the front. This winding
+    // makes every skirt normal point away from the solid.
+    triangles.push([a, b, ba], [b, bb, ba]);
+  }
+  const tl = vertices[0], tr = vertices[nx - 1],
+        br = vertices[(ny - 1) * nx + nx - 1], bl = vertices[(ny - 1) * nx];
+  const back = p => ({x: p.x, y: p.y, z: baseZ});
+  // Rear face points away from the relief, towards negative Z.
+  triangles.push([back(tl), back(tr), back(bl)]);
+  triangles.push([back(tr), back(br), back(bl)]);
+  return triangles;
+}
+
+function trianglesToBinaryStl(triangles) {
+  const buffer = new ArrayBuffer(84 + triangles.length * 50),
+        view = new DataView(buffer);
+  new Uint8Array(buffer, 0, 80).set(
+      new TextEncoder().encode('Stogram surface mesh').subarray(0, 80));
+  view.setUint32(80, triangles.length, true);
+  let offset = 84;
+  for (const triangle of triangles) {
+    const [a, b, c] = triangle,
+          ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z,
+          vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z,
+          nx = uy * vz - uz * vy, ny = uz * vx - ux * vz,
+          nz = ux * vy - uy * vx, length = Math.hypot(nx, ny, nz) || 1,
+          values = [nx / length, ny / length, nz / length,
+                    a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z];
+    for (const value of values) {
+      view.setFloat32(offset, value, true);
+      offset += 4;
+    }
+    view.setUint16(offset, 0, true);
+    offset += 2;
+  }
+  return buffer;
+}
+
+downloadStlBtn.onclick = () => {
+  const triangles = makeSurfaceExportGeometry();
+  if (!triangles) return;
+  downloadBlob(
+      new Blob([trianglesToBinaryStl(triangles)], {type: 'model/stl'}),
+      'stogram-mesh.stl');
 };
 
 function render() {
