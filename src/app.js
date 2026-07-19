@@ -1918,6 +1918,12 @@ function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
     }
   return out;
 }
+function depthDisplayValue(depth, shape) {
+  const value = Math.max(0, Math.min(1, depth));
+  if (value <= 0) return 0;
+  const normalized = Math.pow(value, .82);
+  return shape > 0 ? normalized : 1 - normalized;
+}
 function rebuildDepthPreview(gpuFiltered = null) {
   depthPreview = null;
   depthPreviewW = 0;
@@ -1938,8 +1944,8 @@ function rebuildDepthPreview(gpuFiltered = null) {
     for (let y = 0; y < h; y++)
       for (let x = cropX; x < w; x++) {
         const lin = Math.max(0, Math.min(1, cleanDepthMap[y * w + x]));
-        const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
-        const g = Math.max(0, Math.min(255, Math.round(Math.pow(shown, .82) * 255)));
+        const shown = depthDisplayValue(lin, shape);
+        const g = Math.max(0, Math.min(255, Math.round(shown * 255)));
         imgData.data[o++] = g;
         imgData.data[o++] = g;
         imgData.data[o++] = g;
@@ -1954,7 +1960,9 @@ function rebuildDepthPreview(gpuFiltered = null) {
     depthPreviewH = h;
     const imgData = depthCtx.createImageData(w, h);
     for (let i = 0, o = 0; i < cleanDepthMap.length; i++) {
-      const g = Math.max(0, Math.min(255, Math.round(cleanDepthMap[i] * 255)));
+      const g = Math.max(
+          0, Math.min(255, Math.round(
+              depthDisplayValue(cleanDepthMap[i], shape) * 255)));
       imgData.data[o++] = g;
       imgData.data[o++] = g;
       imgData.data[o++] = g;
@@ -2032,8 +2040,7 @@ function rebuildDepthPreview(gpuFiltered = null) {
       }
       const lin = stretched * alpha;
       cleanDepthMap[y * w + x] = lin;
-      const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
-      const t = Math.pow(shown, .82);
+      const t = depthDisplayValue(lin, shape);
       const g = Math.max(0, Math.min(255, Math.round(t * 255)));
       imgData.data[o++] = g;
       imgData.data[o++] = g;
