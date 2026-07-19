@@ -472,11 +472,49 @@ fn applyContrast(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+function postShaderSource(useF16) {
+  if (!useF16) return POST_SHADER;
+  return POST_SHADER
+      .replace('struct PostParams {', 'enable f16;\nstruct PostParams {')
+      .replace('depthA: array<f32>', 'depthA: array<f16>')
+      .replace('depthB: array<f32>', 'depthB: array<f16>')
+      .replace('coverage: array<f32>', 'coverage: array<f16>')
+      .replace(
+          'depthB[i] = clamp((absoluteDisparity - p.lo) / max(0.0001, p.hi - p.lo), 0.0, 1.0);',
+          'depthB[i] = f16(clamp((absoluteDisparity - p.lo) / max(0.0001, p.hi - p.lo), 0.0, 1.0));')
+      .replace('let value = max(0.0, depthB[i] - p.bg);',
+               'let value = max(0.0, f32(depthB[i]) - p.bg);')
+      .replace('depthA[i] = 0.0;', 'depthA[i] = f16(0.0);')
+      .replace('depthA[i] = value;', 'depthA[i] = f16(value);')
+      .replace('depthB[i] = 0.0; return;', 'depthB[i] = f16(0.0); return;')
+      .replace('values[k] = select(depthA[i], depthA[j], maskB[j] == 2u);',
+               'values[k] = select(f32(depthA[i]), f32(depthA[j]), maskB[j] == 2u);')
+      .replace('let delta = abs(depthA[i] - median);',
+               'let delta = abs(f32(depthA[i]) - median);')
+      .replace(
+          'depthB[i] = select(depthA[i], mix(depthA[i], median, 0.8), delta > 0.018);',
+          'depthB[i] = f16(select(f32(depthA[i]), mix(f32(depthA[i]), median, 0.8), delta > 0.018));')
+      .replace('numerator += depthB[j] * inside * ww;',
+               'numerator += f32(depthB[j]) * inside * ww;')
+      .replace('depthA[i] = base;', 'depthA[i] = f16(base);')
+      .replace('coverage[i] = select(0.0, alpha, c > 0.005);',
+               'coverage[i] = f16(select(0.0, alpha, c > 0.005));')
+      .replace('maskB[i] != 2u || depthA[i] <= 0.0005',
+               'maskB[i] != 2u || f32(depthA[i]) <= 0.0005')
+      .replace('clamp(depthA[i] * 255.0, 0.0, 255.0)',
+               'clamp(f32(depthA[i]) * 255.0, 0.0, 255.0)')
+      .replace('let alpha = coverage[i];', 'let alpha = f32(coverage[i]);')
+      .replace('(depthA[i] - p.lo)', '(f32(depthA[i]) - p.lo)');
+}
+
 async function createGpuState() {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) return null;
-  const device = await adapter.requestDevice();
+  const usesF16 = adapter.features.has('shader-f16');
+  const device = await adapter.requestDevice({
+    requiredFeatures: usesF16 ? ['shader-f16'] : [],
+  });
   const module = device.createShaderModule({code: GPU_SHADER});
   const censusPipeline = await device.createComputePipelineAsync({
     layout: 'auto',
@@ -502,7 +540,7 @@ async function createGpuState() {
     layout: 'auto',
     compute: {module, entryPoint: 'packFinalDisparity'},
   });
-  const postModule = device.createShaderModule({code: POST_SHADER});
+  const postModule = device.createShaderModule({code: postShaderSource(usesF16)});
   const postPipeline = async entryPoint => device.createComputePipelineAsync({
     layout: 'auto', compute: {module: postModule, entryPoint},
   });
@@ -519,7 +557,7 @@ async function createGpuState() {
     selectPipeline, refinePipeline, packFinalPipeline,
     postInitPipeline, postPropagatePipeline, postMaskPipeline,
     postSpikePipeline, postSmoothPipeline, postHistogramPipeline,
-    postContrastPipeline,
+    postContrastPipeline, usesF16,
   };
 }
 
@@ -734,7 +772,7 @@ export async function filterDepthMapGpu(
   const {
     device, postInitPipeline, postPropagatePipeline, postMaskPipeline,
     postSpikePipeline, postSmoothPipeline, postHistogramPipeline,
-    postContrastPipeline,
+    postContrastPipeline, usesF16,
   } = state;
   const startedAt = performance.now(), count = w * h, byteLength = count * 4;
   const positives = [];
@@ -750,11 +788,12 @@ export async function filterDepthMapGpu(
   const makeBuffer = (size, usage) => storageBuffer(device, size, usage);
   const rawBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_DST);
   const confidenceBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_DST);
-  const depthA = makeBuffer(byteLength, U.STORAGE);
-  const depthB = makeBuffer(byteLength, U.STORAGE);
+  const intermediateByteLength = (count * (usesF16 ? 2 : 4) + 3) & ~3;
+  const depthA = makeBuffer(intermediateByteLength, U.STORAGE);
+  const depthB = makeBuffer(intermediateByteLength, U.STORAGE);
   const maskA = makeBuffer(byteLength, U.STORAGE);
   const maskB = makeBuffer(byteLength, U.STORAGE);
-  const coverageBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_SRC);
+  const coverageBuffer = makeBuffer(intermediateByteLength, U.STORAGE);
   const histogramBuffer = makeBuffer(
       256 * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
   const resultBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_SRC);
@@ -883,5 +922,9 @@ export async function filterDepthMapGpu(
     histogramBuffer, resultBuffer, histogramRead, resultRead,
     contrastParams, ...paramsBuffers,
   ]) buffer.destroy();
-  return {depth, processingMs: performance.now() - startedAt};
+  return {
+    depth,
+    precision: usesF16 ? 'f16 storage / f32 math' : 'f32',
+    processingMs: performance.now() - startedAt,
+  };
 }

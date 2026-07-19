@@ -721,7 +721,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, depthTextureFilter);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 gl.texImage2D(
-    gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT,
+    gl.TEXTURE_2D, 0, gl.R16F, 1, 1, 0, gl.RED, gl.FLOAT,
     new Float32Array([0]));
 let shadowSize = 2048;
 const shadowTex = gl.createTexture();
@@ -1428,7 +1428,8 @@ function reprocess(onDone = null) {
             processedDepth, confMap, mapW, mapH, bgDepth, cropX);
         if (gpuFiltered)
           console.info(
-              `Depth WebGPU post: ${gpuFiltered.processingMs.toFixed(0)} ms`);
+              `Depth WebGPU post: ${gpuFiltered.processingMs.toFixed(0)} ms ` +
+              `(${gpuFiltered.precision})`);
       } catch (err) {
         console.warn('WebGPU depth filtering unavailable, using CPU:', err);
       }
@@ -1531,7 +1532,7 @@ function buildMesh() {
     return;
   }
   // Surface mode uses a permanent regular grid. Depth and gradients are read
-  // in both geometry passes from an R32F texture, so changing depth no longer
+  // in both geometry passes from an R16F texture, so changing depth no longer
   // rebuilds or uploads the vertex buffer.
   const surfaceMap = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
       cleanDepthMap :
@@ -1539,8 +1540,7 @@ function buildMesh() {
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(
-      gl.TEXTURE_2D, 0, gl.R32F, mapW, mapH, 0, gl.RED, gl.FLOAT,
-      surfaceMap);
+      gl.TEXTURE_2D, 0, gl.R16F, mapW, mapH, 0, gl.RED, gl.FLOAT, surfaceMap);
   surfaceUsesDepthTexture = true;
   const key = `${mapW}:${mapH}:${cropX}:${stepPx}`;
   if (key === surfaceGridKey) return;
