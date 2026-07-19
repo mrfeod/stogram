@@ -31,42 +31,32 @@ float livingVoronoi(vec2 uv){
   return 1.0-smoothstep(0.08,0.72,nearest);
 }
 float depthWithVoidPattern(vec2 uv,float sourceDepth){
-  if(sourceDepth>0.00001&&sourceDepth<0.995) return sourceDepth;
+  float blackWeight=1.0-smoothstep(0.0,0.035,sourceDepth);
+  float whiteWeight=smoothstep(0.965,1.0,sourceDepth);
+  float patternWeight=max(blackWeight,whiteWeight);
+  if(patternWeight<=0.0) return sourceDepth;
   float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
-  if(sourceDepth>=0.995) return sourceDepth+pattern;
-  return pattern;
+  return sourceDepth+pattern*patternWeight;
 }
 float signedMeshDepth(vec2 uv,float sourceDepth){
   float meshDepth=depthWithVoidPattern(uv,sourceDepth);
-  if(meshDepth<=0.00001) return 0.0;
   float base=uSign<0.0?1.0-sourceDepth:sourceDepth;
-  if(sourceDepth<=0.00001) return base+meshDepth;
-  if(sourceDepth>=0.995) return base+(meshDepth-sourceDepth);
-  return base;
+  return base+(meshDepth-sourceDepth);
 }
 void main(){
   vec2 depthUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));
   vec2 texel=1.0/vec2(textureSize(uDepthTex,0));
-  vec2 normalStep=texel*2.0;
-  vec2 uvL=depthUV-vec2(normalStep.x,0.0), uvR=depthUV+vec2(normalStep.x,0.0);
-  vec2 uvU=depthUV-vec2(0.0,normalStep.y), uvD=depthUV+vec2(0.0,normalStep.y);
-  float dL=0.25*signedMeshDepth(uvL-vec2(0.0,texel.y),texture(uDepthTex,uvL-vec2(0.0,texel.y)).r)
-      +0.5*signedMeshDepth(uvL,texture(uDepthTex,uvL).r)
-      +0.25*signedMeshDepth(uvL+vec2(0.0,texel.y),texture(uDepthTex,uvL+vec2(0.0,texel.y)).r);
-  float dR=0.25*signedMeshDepth(uvR-vec2(0.0,texel.y),texture(uDepthTex,uvR-vec2(0.0,texel.y)).r)
-      +0.5*signedMeshDepth(uvR,texture(uDepthTex,uvR).r)
-      +0.25*signedMeshDepth(uvR+vec2(0.0,texel.y),texture(uDepthTex,uvR+vec2(0.0,texel.y)).r);
-  float dU=0.25*signedMeshDepth(uvU-vec2(texel.x,0.0),texture(uDepthTex,uvU-vec2(texel.x,0.0)).r)
-      +0.5*signedMeshDepth(uvU,texture(uDepthTex,uvU).r)
-      +0.25*signedMeshDepth(uvU+vec2(texel.x,0.0),texture(uDepthTex,uvU+vec2(texel.x,0.0)).r);
-  float dD=0.25*signedMeshDepth(uvD-vec2(texel.x,0.0),texture(uDepthTex,uvD-vec2(texel.x,0.0)).r)
-      +0.5*signedMeshDepth(uvD,texture(uDepthTex,uvD).r)
-      +0.25*signedMeshDepth(uvD+vec2(texel.x,0.0),texture(uDepthTex,uvD+vec2(texel.x,0.0)).r);
+  vec2 uvL=depthUV-vec2(texel.x,0.0), uvR=depthUV+vec2(texel.x,0.0);
+  vec2 uvU=depthUV-vec2(0.0,texel.y), uvD=depthUV+vec2(0.0,texel.y);
+  float dL=signedMeshDepth(uvL,texture(uDepthTex,uvL).r);
+  float dR=signedMeshDepth(uvR,texture(uDepthTex,uvR).r);
+  float dU=signedMeshDepth(uvU,texture(uDepthTex,uvU).r);
+  float dD=signedMeshDepth(uvD,texture(uDepthTex,uvD).r);
   float sampledDepth=texture(uDepthTex,depthUV).r;
   sampledDepth=signedMeshDepth(depthUV,sampledDepth);
   float cpuDepth=uSign<0.0?1.0-aDepth:aDepth;
   float depth=mix(cpuDepth,sampledDepth,uUseDepthTex);
-  vec2 sampledGradient=vec2(dR-dL,dD-dU)*float(textureSize(uDepthTex,0).x)*0.115;
+  vec2 sampledGradient=vec2(dR-dL,dD-dU)*float(textureSize(uDepthTex,0).x)*0.23;
   vec2 gradient=mix(aGradient*uSign,sampledGradient,uUseDepthTex);
   bool auxiliary=uUseDepthTex>0.5&&aDepth<-0.5;
   bool side=auxiliary&&aDepth<-1.5;
@@ -139,18 +129,17 @@ float livingVoronoi(vec2 uv){
   return 1.0-smoothstep(0.08,0.72,nearest);
 }
 float depthWithVoidPattern(vec2 uv,float sourceDepth){
-  if(sourceDepth>0.00001&&sourceDepth<0.995) return sourceDepth;
+  float blackWeight=1.0-smoothstep(0.0,0.035,sourceDepth);
+  float whiteWeight=smoothstep(0.965,1.0,sourceDepth);
+  float patternWeight=max(blackWeight,whiteWeight);
+  if(patternWeight<=0.0) return sourceDepth;
   float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
-  if(sourceDepth>=0.995) return sourceDepth+pattern;
-  return pattern;
+  return sourceDepth+pattern*patternWeight;
 }
 float signedMeshDepth(vec2 uv,float sourceDepth){
   float meshDepth=depthWithVoidPattern(uv,sourceDepth);
-  if(meshDepth<=0.00001) return 0.0;
   float base=uSign<0.0?1.0-sourceDepth:sourceDepth;
-  if(sourceDepth<=0.00001) return base+meshDepth;
-  if(sourceDepth>=0.995) return base+(meshDepth-sourceDepth);
-  return base;
+  return base+(meshDepth-sourceDepth);
 }
 void main(){
   vec2 uv=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),0.5-aXY.y/(2.0*uSourceAspect));

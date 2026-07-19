@@ -44,6 +44,7 @@ let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0;
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
+const meshDepthBlurCache = new WeakMap();
 let meshSourceBounds = {minX: -1, maxX: 1, minY: -1, maxY: 1, minD: 0, maxD: 0};
 function setProgress(value, _label) {
   const v = Math.max(0, Math.min(1, Number(value) || 0));
@@ -1508,12 +1509,7 @@ function reprocess(onDone = null) {
 function buildMesh() {
   if (!processedDepth) return;
   const mode = currentViewMode();
-  // Sub-pixel tessellation lets the vertex shader sample the linearly filtered
-  // depth texture between source pixels instead of reproducing its staircase.
-  // Cap the grid near one million vertices for large imported depth maps.
-  const surfacePixels = Math.max(1, (mapW - cropX) * mapH);
-  const surfaceStep = Math.max(0.5, Math.sqrt(surfacePixels / 1000000));
-  const stepPx = mode === 'surface' ? surfaceStep : MESH_STEP_PX;
+  const stepPx = MESH_STEP_PX;
   const xs = axisValues(cropX, mapW, stepPx), ys = axisValues(0, mapH, stepPx);
   const nx = xs.length, ny = ys.length;
   const visibleW = Math.max(1, mapW - 1 - cropX),
@@ -1604,9 +1600,16 @@ function buildMesh() {
   // Surface mode uses a permanent regular grid. Depth and gradients are read
   // in both geometry passes from an R16F texture, so changing depth no longer
   // rebuilds or uploads the vertex buffer.
-  const surfaceMap = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
+  const surfaceSource = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
       cleanDepthMap :
       processedDepth;
+  let surfaceMap = meshDepthBlurCache.get(surfaceSource);
+  if (!surfaceMap) {
+    // Mesh-only smoothing turns quantized disparity terraces into continuous
+    // slopes. Preview/export keep the original filtered depth map.
+    surfaceMap = gaussianBlur(surfaceSource, mapW, mapH, 2.0);
+    meshDepthBlurCache.set(surfaceSource, surfaceMap);
+  }
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(
