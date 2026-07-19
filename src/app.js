@@ -9,6 +9,7 @@ const cv = $('#view'), depthCv = $('#depthView'),
       stage = cv.parentElement,
       progressOverlay = $('#progressOverlay'),
       progressText = $('#progressText'), progressBar = $('#progressBar');
+const downloadDepthBtn = $('#downloadDepth');
 const depthR = $('#depth'), depthN = $('#depthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
 const periodR = $('#period'), periodN = $('#periodNum');
@@ -1019,6 +1020,8 @@ function updateLayerUi() {
   const depthMode = mode === 'depthmap';
   cv.style.display = depthMode ? 'none' : 'block';
   depthCv.style.display = depthMode ? 'block' : 'none';
+  downloadDepthBtn.hidden = !depthMode;
+  downloadDepthBtn.disabled = !depthPreview;
   depthR.parentElement.classList.toggle('disabled', depthMode);
 }
 updateLayerUi();
@@ -2024,6 +2027,7 @@ function rebuildDepthPreview(gpuFiltered = null) {
   depthPreviewH = srcH;
 }
 function renderDepthMap() {
+  downloadDepthBtn.disabled = !depthPreview;
   if (!depthPreview || !depthPreviewW || !depthPreviewH) {
     depthCtx.clearRect(0, 0, depthCv.width, depthCv.height);
     return;
@@ -2044,6 +2048,33 @@ function renderDepthMap() {
   depthCtx.imageSmoothingEnabled = true;
   depthCtx.drawImage(tmp, dx, dy, dw, dh);
 }
+
+downloadDepthBtn.onclick = () => {
+  if (!depthPreview || !depthPreviewW || !depthPreviewH) return;
+  const source = document.createElement('canvas');
+  source.width = depthPreviewW;
+  source.height = depthPreviewH;
+  source.getContext('2d').putImageData(depthPreview, 0, 0);
+  const targetHeight = Math.max(
+      depthPreviewH, img?.naturalHeight || depthPreviewH);
+  const targetWidth = Math.max(
+      1, Math.round(depthPreviewW * targetHeight / depthPreviewH));
+  const output = document.createElement('canvas');
+  output.width = targetWidth;
+  output.height = targetHeight;
+  const outputContext = output.getContext('2d');
+  outputContext.imageSmoothingEnabled = true;
+  outputContext.imageSmoothingQuality = 'high';
+  outputContext.drawImage(source, 0, 0, targetWidth, targetHeight);
+  output.toBlob(blob => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href = url;
+    link.download = 'depth-map.png';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, 'image/png');
+};
 
 function render() {
   if (currentViewMode() === 'depthmap') {

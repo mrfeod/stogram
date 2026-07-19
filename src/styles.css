@@ -248,6 +248,31 @@
       image-rendering: auto
     }
 
+    #downloadDepth {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      font-size: 22px;
+      line-height: 1;
+      font-family: "Segoe UI Symbol", "Apple Symbols", sans-serif
+    }
+
+    #downloadDepth span {
+      display: block;
+      line-height: 1;
+      transform: translateY(-1px)
+    }
+
+    #downloadDepth[hidden] {
+      display: none
+    }
+
     #drop {
       position: absolute;
       inset: 22px;
