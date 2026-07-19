@@ -270,7 +270,7 @@ struct PostParams {
 }
 @group(0) @binding(0) var<uniform> p: PostParams;
 @group(0) @binding(1) var<storage, read> raw: array<f32>;
-@group(0) @binding(2) var<storage, read> confidence: array<f32>;
+@group(0) @binding(2) var<storage, read_write> confidence: array<f32>;
 @group(0) @binding(3) var<storage, read_write> depthA: array<f32>;
 @group(0) @binding(4) var<storage, read_write> depthB: array<f32>;
 @group(0) @binding(5) var<storage, read_write> maskA: array<u32>;
@@ -278,6 +278,8 @@ struct PostParams {
 @group(0) @binding(7) var<storage, read_write> coverage: array<f32>;
 @group(0) @binding(8) var<storage, read_write> histogram: array<atomic<u32>>;
 @group(0) @binding(9) var<storage, read_write> result: array<f32>;
+@group(0) @binding(10) var<storage, read> disparity: array<u32>;
+@group(0) @binding(11) var<storage, read> disparityReliability: array<f32>;
 
 fn indexAt(x: i32, y: i32) -> u32 {
   return u32(clamp(y, 0, i32(p.h) - 1)) * p.w +
@@ -286,6 +288,41 @@ fn indexAt(x: i32, y: i32) -> u32 {
 fn gaussianWeight(offset: i32, sigma: f32) -> f32 {
   let q = f32(offset);
   return exp(-(q * q) / (2.0 * sigma * sigma));
+}
+
+fn stereoMinDisp() -> i32 {
+  return -max(2, i32(floor(f32(p.cropX) * 0.08)));
+}
+fn stereoXStart() -> i32 { return i32(p.cropX) - stereoMinDisp() + 2; }
+fn stereoValidW() -> i32 { return max(1, i32(p.w) - 3 - stereoXStart()); }
+
+@compute @workgroup_size(64)
+fn makeDisparityHistogram(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pixels = u32(stereoValidW()) * p.h;
+  if (gid.x >= pixels) { return; }
+  atomicAdd(&histogram[min(255u, disparity[gid.x])], 1u);
+}
+
+@compute @workgroup_size(8, 8)
+fn expandDisparity(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let xStart = stereoXStart();
+  let validW = stereoValidW();
+  let vx = clamp(i32(gid.x) - xStart, 0, validW - 1);
+  let pi = i32(gid.y) * validW + vx;
+  let i = gid.y * p.w + gid.x;
+  let absoluteDisparity = f32(stereoMinDisp() + i32(disparity[pi]));
+  depthB[i] = clamp((absoluteDisparity - p.lo) / max(0.0001, p.hi - p.lo), 0.0, 1.0);
+  confidence[i] = clamp(disparityReliability[pi] * 4.0, 0.0, 1.0);
+}
+
+@compute @workgroup_size(64)
+fn makeSignedHistogram(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.w * p.h || i % p.w < p.cropX) { return; }
+  let value = max(0.0, depthB[i] - p.bg);
+  if (value <= 0.0) { return; }
+  atomicAdd(&histogram[u32(clamp(value * 255.0, 0.0, 255.0))], 1u);
 }
 
 @compute @workgroup_size(8, 8)
