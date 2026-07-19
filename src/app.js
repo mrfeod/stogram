@@ -33,8 +33,11 @@ let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, depthPreview = null, depthPreviewW = 0,
     depthPreviewH = 0, depthCoverage = null;
-let yaw = -.22, pitch = -.16, zoom = 1, drag = false, lastX = 0, lastY = 0,
-    pinch = 0;
+let yaw = -.22, pitch = -.16, zoom = 1, drag = false;
+let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
+    lastGestureX = 0, lastGestureY = 0, lastGestureTime = 0,
+    inertiaYaw = 0, inertiaPitch = 0;
+const activePointers = new Map();
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
@@ -562,6 +565,8 @@ function pauseAuto(ms = 1800) {
   autoPauseUntil = performance.now() + ms;
 }
 function resetCamera() {
+  inertiaYaw = 0;
+  inertiaPitch = 0;
   yaw = -.22;
   pitch = -.16;
   zoom = 1;
@@ -1000,6 +1005,19 @@ resize();
 function frame(now) {
   const dt = Math.min(50, now - lastFrame);
   lastFrame = now;
+  if (!drag && !autoRotate &&
+      (Math.abs(inertiaYaw) > .000002 || Math.abs(inertiaPitch) > .000002)) {
+    yaw += inertiaYaw * dt;
+    pitch = Math.max(-1.35, Math.min(1.35, pitch + inertiaPitch * dt));
+    const damping = Math.exp(-dt / 420);
+    inertiaYaw *= damping;
+    inertiaPitch *= damping;
+    if (Math.abs(inertiaYaw) < .000002) inertiaYaw = 0;
+    if (Math.abs(inertiaPitch) < .000002) inertiaPitch = 0;
+    autoBaseYaw = yaw;
+    autoBasePitch = pitch;
+    dirty = true;
+  }
   if (processedDepth && autoRotate && !drag && now > autoPauseUntil) {
     autoTime += dt * 0.001;
     yaw = autoBaseYaw + Math.sin(autoTime * 0.72) * 0.55;
@@ -2188,59 +2206,106 @@ document.querySelectorAll('input[name="viewmode"]')
       sched();
     });
 
-// pointer controls
+// Unified mouse/touch gesture controller. Pointer events are the sole source
+// of rotation and pinch state, so two-finger zoom can never also rotate.
+function pointerDistance() {
+  const points = [...activePointers.values()];
+  if (points.length < 2) return 0;
+  return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+}
 cv.addEventListener('pointerdown', e => {
-  disableAutoRotate();
-  drag = true;
-  pauseAuto();
-  lastX = e.clientX;
-  lastY = e.clientY;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  activePointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
   cv.setPointerCapture(e.pointerId);
+  // Mouse down is unambiguously a rotation gesture. A first touch may become
+  // a pinch, so defer stopping auto-rotation until it actually moves alone.
+  drag = e.pointerType === 'mouse';
+  if (e.pointerType === 'mouse') {
+    disableAutoRotate();
+    pauseAuto();
+  }
+  inertiaYaw = 0;
+  inertiaPitch = 0;
+  if (activePointers.size >= 2) {
+    gestureMode = 'pinch';
+    drag = false;
+    disableAutoRotate();
+    pauseAuto();
+    gesturePointerId = null;
+    pinchDistance = pointerDistance();
+  } else {
+    gestureMode = 'rotate';
+    gesturePointerId = e.pointerId;
+    lastGestureX = e.clientX;
+    lastGestureY = e.clientY;
+    lastGestureTime = performance.now();
+  }
 });
 cv.addEventListener('pointermove', e => {
-  if (!drag) return;
-  yaw += (e.clientX - lastX) * .008;
-  pitch = Math.max(-1.35, Math.min(1.35, pitch + (e.clientY - lastY) * .008));
-  lastX = e.clientX;
-  lastY = e.clientY;
+  if (!activePointers.has(e.pointerId)) return;
+  e.preventDefault();
+  activePointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
+  if (activePointers.size >= 2) {
+    if (gestureMode !== 'pinch') {
+      gestureMode = 'pinch';
+      drag = false;
+      disableAutoRotate();
+      pauseAuto();
+      inertiaYaw = inertiaPitch = 0;
+      pinchDistance = pointerDistance();
+      return;
+    }
+    const distance = pointerDistance();
+    if (pinchDistance > 0 && distance > 0)
+      zoom = Math.max(.35, Math.min(4, zoom * distance / pinchDistance));
+    pinchDistance = distance;
+    sched();
+    return;
+  }
+  // Do not turn the remaining finger into rotation after a pinch. A new
+  // rotation gesture starts only after every pointer has been released.
+  if (gestureMode !== 'rotate' || e.pointerId !== gesturePointerId) return;
+  if (!drag) {
+    if (Math.hypot(
+        e.clientX - lastGestureX, e.clientY - lastGestureY) < 5) return;
+    drag = true;
+    disableAutoRotate();
+  }
+  const now = performance.now(), elapsed = Math.max(4, now - lastGestureTime),
+        dx = e.clientX - lastGestureX, dy = e.clientY - lastGestureY;
+  yaw += dx * .008;
+  pitch = Math.max(-1.35, Math.min(1.35, pitch + dy * .008));
+  const instantYaw = dx * .008 / elapsed, instantPitch = dy * .008 / elapsed;
+  inertiaYaw = inertiaYaw * .65 + instantYaw * .35;
+  inertiaPitch = inertiaPitch * .65 + instantPitch * .35;
+  lastGestureX = e.clientX;
+  lastGestureY = e.clientY;
+  lastGestureTime = now;
   sched();
 });
-['pointerup', 'pointercancel'].forEach(n => cv.addEventListener(n, () => {
-  drag = false;
-  autoBaseYaw = yaw;
-  autoBasePitch = pitch;
-  pauseAuto();
-}));
+function finishPointer(e) {
+  activePointers.delete(e.pointerId);
+  if (cv.hasPointerCapture(e.pointerId)) cv.releasePointerCapture(e.pointerId);
+  if (activePointers.size === 0) {
+    drag = false;
+    if (gestureMode === 'pinch') inertiaYaw = inertiaPitch = 0;
+    gestureMode = 'none';
+    gesturePointerId = null;
+    pinchDistance = 0;
+    autoBaseYaw = yaw;
+    autoBasePitch = pitch;
+    pauseAuto();
+  }
+}
+['pointerup', 'pointercancel', 'lostpointercapture']
+    .forEach(n => cv.addEventListener(n, finishPointer));
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   pauseAuto();
   zoom = Math.max(.35, Math.min(4, zoom * Math.exp(-e.deltaY * .001)));
   sched();
 }, {passive: false});
-cv.addEventListener('touchstart', e => {
-  disableAutoRotate();
-  if (e.touches.length === 2)
-    pinch = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY);
-}, {passive: true});
-cv.addEventListener('touchmove', e => {
-  if (e.touches.length === 2) {
-    const p = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY);
-    if (pinch) zoom = Math.max(.35, Math.min(4, zoom * p / pinch));
-    pinch = p;
-    pauseAuto();
-    sched();
-  }
-}, {passive: true});
-cv.addEventListener('touchend', () => {
-  pinch = 0;
-  autoBaseYaw = yaw;
-  autoBasePitch = pitch;
-  pauseAuto();
-});
 cv.ondblclick = resetCamera;
 
 function setStereogramView(open) {

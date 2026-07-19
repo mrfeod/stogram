@@ -17,9 +17,20 @@
       margin: 0;
       height: 100%;
       overflow: hidden;
+      overscroll-behavior: none;
       background: var(--bg);
       font: 14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       color: var(--text)
+    }
+
+    body,
+    #app,
+    main,
+    canvas {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent
     }
 
     #app {
@@ -300,13 +311,20 @@
       position: absolute;
       right: 12px;
       bottom: 12px;
-      width: min(28vw, 240px);
-      max-height: 28vh;
+      width: min(20vw, 180px);
+      max-height: 22vh;
       object-fit: contain;
       border: 1px solid var(--line);
       border-radius: 10px;
       background: #000;
-      cursor: zoom-in
+      cursor: zoom-in;
+      opacity: .6;
+      transition: opacity .18s ease
+    }
+
+    #thumb:hover,
+    #thumb:focus-visible {
+      opacity: 1
     }
 
     .disabled {
@@ -335,7 +353,7 @@
       }
 
       #thumb {
-        width: 112px;
+        width: 88px;
         bottom: 58px
       }
     }
@@ -351,5 +369,6 @@
       border: 0;
       border-radius: 0;
       background: #000;
-      cursor: zoom-out
+      cursor: zoom-out;
+      opacity: 1
     }
