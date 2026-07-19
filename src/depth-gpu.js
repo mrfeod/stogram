@@ -257,6 +257,184 @@ fn packFinalDisparity(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+const POST_SHADER = /* wgsl */ `
+struct PostParams {
+  w: u32,
+  h: u32,
+  cropX: u32,
+  phase: u32,
+  bg: f32,
+  highThreshold: f32,
+  lo: f32,
+  hi: f32,
+}
+@group(0) @binding(0) var<uniform> p: PostParams;
+@group(0) @binding(1) var<storage, read> raw: array<f32>;
+@group(0) @binding(2) var<storage, read> confidence: array<f32>;
+@group(0) @binding(3) var<storage, read_write> depthA: array<f32>;
+@group(0) @binding(4) var<storage, read_write> depthB: array<f32>;
+@group(0) @binding(5) var<storage, read_write> maskA: array<u32>;
+@group(0) @binding(6) var<storage, read_write> maskB: array<u32>;
+@group(0) @binding(7) var<storage, read_write> coverage: array<f32>;
+@group(0) @binding(8) var<storage, read_write> histogram: array<atomic<u32>>;
+@group(0) @binding(9) var<storage, read_write> result: array<f32>;
+
+fn indexAt(x: i32, y: i32) -> u32 {
+  return u32(clamp(y, 0, i32(p.h) - 1)) * p.w +
+      u32(clamp(x, 0, i32(p.w) - 1));
+}
+fn gaussianWeight(offset: i32, sigma: f32) -> f32 {
+  let q = f32(offset);
+  return exp(-(q * q) / (2.0 * sigma * sigma));
+}
+
+@compute @workgroup_size(8, 8)
+fn initMask(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let i = gid.y * p.w + gid.x;
+  if (gid.x < p.cropX) {
+    depthA[i] = 0.0;
+    maskA[i] = 0u;
+    return;
+  }
+  let value = max(0.0, raw[i] - p.bg);
+  depthA[i] = value;
+  if (value > p.highThreshold) {
+    maskA[i] = 2u;
+    return;
+  }
+  let low = max(0.0015, p.highThreshold * 0.30);
+  if (value <= low) { maskA[i] = 0u; return; }
+  var support = 0u;
+  for (var yy = -1; yy <= 1; yy++) {
+    for (var xx = -1; xx <= 1; xx++) {
+      if (max(0.0, raw[indexAt(i32(gid.x) + xx, i32(gid.y) + yy)] - p.bg) > low) {
+        support++;
+      }
+    }
+  }
+  let reliable = confidence[i] >= 0.025 || value > p.highThreshold * 0.55;
+  maskA[i] = select(0u, 1u, support >= 4u && reliable);
+}
+
+@compute @workgroup_size(8, 8)
+fn propagateMask(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let i = gid.y * p.w + gid.x;
+  let fromB = (p.phase & 1u) != 0u;
+  let current = select(maskA[i], maskB[i], fromB);
+  var next = current;
+  if (current == 1u) {
+    for (var yy = -1; yy <= 1; yy++) {
+      for (var xx = -1; xx <= 1; xx++) {
+        let j = indexAt(i32(gid.x) + xx, i32(gid.y) + yy);
+        if (select(maskA[j], maskB[j], fromB) == 2u) { next = 2u; }
+      }
+    }
+  }
+  if (fromB) { maskA[i] = next; } else { maskB[i] = next; }
+}
+
+@compute @workgroup_size(8, 8)
+fn smoothMask(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let i = gid.y * p.w + gid.x;
+  var sum = 0.0;
+  var weight = 0.0;
+  for (var yy = -7; yy <= 7; yy++) {
+    let wy = gaussianWeight(yy, 2.35);
+    for (var xx = -7; xx <= 7; xx++) {
+      let ww = wy * gaussianWeight(xx, 2.35);
+      let j = indexAt(i32(gid.x) + xx, i32(gid.y) + yy);
+      sum += select(0.0, 1.0, maskA[j] == 2u) * ww;
+      weight += ww;
+    }
+  }
+  maskB[i] = select(0u, 2u, gid.x >= p.cropX && sum / weight >= 0.47);
+}
+
+fn sort9(v: ptr<function, array<f32, 9>>) {
+  for (var a = 1; a < 9; a++) {
+    let value = (*v)[a];
+    var b = a - 1;
+    loop {
+      if (b < 0 || (*v)[b] <= value) { break; }
+      (*v)[b + 1] = (*v)[b];
+      b--;
+    }
+    (*v)[b + 1] = value;
+  }
+}
+
+@compute @workgroup_size(8, 8)
+fn suppressSpikes(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let i = gid.y * p.w + gid.x;
+  if (maskB[i] != 2u) { depthB[i] = 0.0; return; }
+  var values: array<f32, 9>;
+  var k = 0;
+  for (var yy = -1; yy <= 1; yy++) {
+    for (var xx = -1; xx <= 1; xx++) {
+      let j = indexAt(i32(gid.x) + xx, i32(gid.y) + yy);
+      values[k] = select(depthA[i], depthA[j], maskB[j] == 2u);
+      k++;
+    }
+  }
+  sort9(&values);
+  let median = values[4];
+  let delta = abs(depthA[i] - median);
+  depthB[i] = select(depthA[i], mix(depthA[i], median, 0.8), delta > 0.018);
+}
+
+@compute @workgroup_size(8, 8)
+fn smoothDepth(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.w || gid.y >= p.h) { return; }
+  let i = gid.y * p.w + gid.x;
+  var numerator = 0.0;
+  var denominator = 0.0;
+  var maskSum = 0.0;
+  var maskWeight = 0.0;
+  for (var yy = -12; yy <= 12; yy++) {
+    let wy = gaussianWeight(yy, 4.0);
+    for (var xx = -12; xx <= 12; xx++) {
+      let ww = wy * gaussianWeight(xx, 4.0);
+      let j = indexAt(i32(gid.x) + xx, i32(gid.y) + yy);
+      let inside = select(0.0, 1.0, maskB[j] == 2u);
+      numerator += depthB[j] * inside * ww;
+      denominator += inside * ww;
+      maskSum += inside * ww;
+      maskWeight += ww;
+    }
+  }
+  let base = select(0.0, numerator / denominator, denominator > 0.0001);
+  let c = clamp(maskSum / maskWeight, 0.0, 1.0);
+  let alpha = smoothstep(0.015, 0.985, c);
+  depthA[i] = base;
+  coverage[i] = select(0.0, alpha, c > 0.005);
+}
+
+@compute @workgroup_size(64)
+fn makeHistogram(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.w * p.h) { return; }
+  if (maskB[i] != 2u || depthA[i] <= 0.0005) { return; }
+  let bin = u32(clamp(depthA[i] * 255.0, 0.0, 255.0));
+  atomicAdd(&histogram[bin], 1u);
+}
+
+@compute @workgroup_size(64)
+fn applyContrast(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.w * p.h) { return; }
+  let alpha = coverage[i];
+  var stretched = clamp((depthA[i] - p.lo) / max(0.000001, p.hi - p.lo), 0.0, 1.0);
+  if (stretched > 0.0 && stretched < 0.28 && alpha > 0.82) {
+    stretched = 0.28 * pow(stretched / 0.28, 0.72);
+  }
+  result[i] = stretched * alpha;
+}
+`;
+
 async function createGpuState() {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter();
@@ -287,9 +465,24 @@ async function createGpuState() {
     layout: 'auto',
     compute: {module, entryPoint: 'packFinalDisparity'},
   });
+  const postModule = device.createShaderModule({code: POST_SHADER});
+  const postPipeline = async entryPoint => device.createComputePipelineAsync({
+    layout: 'auto', compute: {module: postModule, entryPoint},
+  });
+  const [postInitPipeline, postPropagatePipeline, postMaskPipeline,
+         postSpikePipeline, postSmoothPipeline, postHistogramPipeline,
+         postContrastPipeline] = await Promise.all([
+    postPipeline('initMask'), postPipeline('propagateMask'),
+    postPipeline('smoothMask'), postPipeline('suppressSpikes'),
+    postPipeline('smoothDepth'), postPipeline('makeHistogram'),
+    postPipeline('applyContrast'),
+  ]);
   return {
     device, censusPipeline, costPipeline, sgmPipeline,
     selectPipeline, refinePipeline, packFinalPipeline,
+    postInitPipeline, postPropagatePipeline, postMaskPipeline,
+    postSpikePipeline, postSmoothPipeline, postHistogramPipeline,
+    postContrastPipeline,
   };
 }
 
@@ -473,4 +666,188 @@ export async function computeCostVolumeGpu(gray, w, h, period) {
   return {
     packedCosts, packedDisparity, reliability, wordsPerPixel, processingMs,
   };
+}
+
+function percentileSorted(values, p) {
+  if (!values.length) return 0;
+  return values[Math.max(0, Math.min(
+      values.length - 1, Math.floor((values.length - 1) * p)))];
+}
+
+function histogramPercentile(histogram, p) {
+  let total = 0;
+  for (const count of histogram) total += count;
+  if (!total) return 0;
+  const target = total * p;
+  let sum = 0;
+  for (let i = 0; i < histogram.length; i++) {
+    sum += histogram[i];
+    if (sum >= target) return i / 255;
+  }
+  return 1;
+}
+
+export async function filterDepthMapGpu(
+    rawDepth, confidence, w, h, bgDepth, cropX) {
+  const state = await gpuState();
+  if (!state) return null;
+  const {
+    device, postInitPipeline, postPropagatePipeline, postMaskPipeline,
+    postSpikePipeline, postSmoothPipeline, postHistogramPipeline,
+    postContrastPipeline,
+  } = state;
+  const startedAt = performance.now(), count = w * h, byteLength = count * 4;
+  const positives = [];
+  for (let y = 0; y < h; y += 2)
+    for (let x = cropX; x < w; x += 2) {
+      const value = Math.max(0, rawDepth[y * w + x] - bgDepth);
+      if (value > 0) positives.push(value);
+    }
+  positives.sort((a, b) => a - b);
+  const highThreshold = positives.length ?
+      Math.max(.004, percentileSorted(positives, .10) * .65) : .008;
+  const U = GPUBufferUsage;
+  const makeBuffer = (size, usage) => storageBuffer(device, size, usage);
+  const rawBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_DST);
+  const confidenceBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_DST);
+  const depthA = makeBuffer(byteLength, U.STORAGE);
+  const depthB = makeBuffer(byteLength, U.STORAGE);
+  const maskA = makeBuffer(byteLength, U.STORAGE);
+  const maskB = makeBuffer(byteLength, U.STORAGE);
+  const coverageBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_SRC);
+  const histogramBuffer = makeBuffer(
+      256 * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
+  const resultBuffer = makeBuffer(byteLength, U.STORAGE | U.COPY_SRC);
+  const histogramRead = makeBuffer(256 * 4, U.COPY_DST | U.MAP_READ);
+  const resultRead = makeBuffer(byteLength, U.COPY_DST | U.MAP_READ);
+  const coverageRead = makeBuffer(byteLength, U.COPY_DST | U.MAP_READ);
+  device.queue.writeBuffer(rawBuffer, 0, rawDepth);
+  device.queue.writeBuffer(confidenceBuffer, 0, confidence);
+  const paramsBuffers = [0, 1].map(phase => {
+    const buffer = makeBuffer(32, U.UNIFORM | U.COPY_DST);
+    const data = new ArrayBuffer(32), u = new Uint32Array(data), f = new Float32Array(data);
+    u[0] = w;
+    u[1] = h;
+    u[2] = cropX;
+    u[3] = phase;
+    f[4] = bgDepth;
+    f[5] = highThreshold;
+    f[6] = 0;
+    f[7] = 1;
+    device.queue.writeBuffer(buffer, 0, data);
+    return buffer;
+  });
+  const bind = (pipeline, entries) => device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0), entries,
+  });
+  const groupsX = Math.ceil(w / 8), groupsY = Math.ceil(h / 8);
+  const encoder = device.createCommandEncoder();
+  encoder.clearBuffer(histogramBuffer);
+  let pass = encoder.beginComputePass();
+  pass.setPipeline(postInitPipeline);
+  pass.setBindGroup(0, bind(postInitPipeline, [
+    {binding: 0, resource: {buffer: paramsBuffers[0]}},
+    {binding: 1, resource: {buffer: rawBuffer}},
+    {binding: 2, resource: {buffer: confidenceBuffer}},
+    {binding: 3, resource: {buffer: depthA}},
+    {binding: 5, resource: {buffer: maskA}},
+  ]));
+  pass.dispatchWorkgroups(groupsX, groupsY);
+  pass.end();
+  for (let iteration = 0; iteration < 64; iteration++) {
+    pass = encoder.beginComputePass();
+    pass.setPipeline(postPropagatePipeline);
+    pass.setBindGroup(0, bind(postPropagatePipeline, [
+      {binding: 0, resource: {buffer: paramsBuffers[iteration & 1]}},
+      {binding: 5, resource: {buffer: maskA}},
+      {binding: 6, resource: {buffer: maskB}},
+    ]));
+    pass.dispatchWorkgroups(groupsX, groupsY);
+    pass.end();
+  }
+  pass = encoder.beginComputePass();
+  pass.setPipeline(postMaskPipeline);
+  pass.setBindGroup(0, bind(postMaskPipeline, [
+    {binding: 0, resource: {buffer: paramsBuffers[0]}},
+    {binding: 5, resource: {buffer: maskA}},
+    {binding: 6, resource: {buffer: maskB}},
+  ]));
+  pass.dispatchWorkgroups(groupsX, groupsY);
+  pass.end();
+  pass = encoder.beginComputePass();
+  pass.setPipeline(postSpikePipeline);
+  pass.setBindGroup(0, bind(postSpikePipeline, [
+    {binding: 0, resource: {buffer: paramsBuffers[0]}},
+    {binding: 3, resource: {buffer: depthA}},
+    {binding: 4, resource: {buffer: depthB}},
+    {binding: 6, resource: {buffer: maskB}},
+  ]));
+  pass.dispatchWorkgroups(groupsX, groupsY);
+  pass.end();
+  pass = encoder.beginComputePass();
+  pass.setPipeline(postSmoothPipeline);
+  pass.setBindGroup(0, bind(postSmoothPipeline, [
+    {binding: 0, resource: {buffer: paramsBuffers[0]}},
+    {binding: 3, resource: {buffer: depthA}},
+    {binding: 4, resource: {buffer: depthB}},
+    {binding: 6, resource: {buffer: maskB}},
+    {binding: 7, resource: {buffer: coverageBuffer}},
+  ]));
+  pass.dispatchWorkgroups(groupsX, groupsY);
+  pass.end();
+  pass = encoder.beginComputePass();
+  pass.setPipeline(postHistogramPipeline);
+  pass.setBindGroup(0, bind(postHistogramPipeline, [
+    {binding: 0, resource: {buffer: paramsBuffers[0]}},
+    {binding: 3, resource: {buffer: depthA}},
+    {binding: 6, resource: {buffer: maskB}},
+    {binding: 8, resource: {buffer: histogramBuffer}},
+  ]));
+  pass.dispatchWorkgroups(Math.ceil(count / 64));
+  pass.end();
+  encoder.copyBufferToBuffer(histogramBuffer, 0, histogramRead, 0, 256 * 4);
+  device.queue.submit([encoder.finish()]);
+  await histogramRead.mapAsync(GPUMapMode.READ);
+  const histogram = new Uint32Array(histogramRead.getMappedRange().slice(0));
+  histogramRead.unmap();
+  const lo = histogramPercentile(histogram, .01);
+  const hi = Math.max(lo + .02, histogramPercentile(histogram, .99));
+  const contrastParams = makeBuffer(32, U.UNIFORM | U.COPY_DST);
+  const contrastData = new ArrayBuffer(32), cu = new Uint32Array(contrastData),
+        cf = new Float32Array(contrastData);
+  cu[0] = w;
+  cu[1] = h;
+  cu[2] = cropX;
+  cf[4] = bgDepth;
+  cf[5] = highThreshold;
+  cf[6] = lo;
+  cf[7] = hi;
+  device.queue.writeBuffer(contrastParams, 0, contrastData);
+  const finalEncoder = device.createCommandEncoder();
+  pass = finalEncoder.beginComputePass();
+  pass.setPipeline(postContrastPipeline);
+  pass.setBindGroup(0, bind(postContrastPipeline, [
+    {binding: 0, resource: {buffer: contrastParams}},
+    {binding: 3, resource: {buffer: depthA}},
+    {binding: 7, resource: {buffer: coverageBuffer}},
+    {binding: 9, resource: {buffer: resultBuffer}},
+  ]));
+  pass.dispatchWorkgroups(Math.ceil(count / 64));
+  pass.end();
+  finalEncoder.copyBufferToBuffer(resultBuffer, 0, resultRead, 0, byteLength);
+  finalEncoder.copyBufferToBuffer(coverageBuffer, 0, coverageRead, 0, byteLength);
+  device.queue.submit([finalEncoder.finish()]);
+  await Promise.all([
+    resultRead.mapAsync(GPUMapMode.READ), coverageRead.mapAsync(GPUMapMode.READ),
+  ]);
+  const depth = new Float32Array(resultRead.getMappedRange().slice(0));
+  const coverage = new Float32Array(coverageRead.getMappedRange().slice(0));
+  resultRead.unmap();
+  coverageRead.unmap();
+  for (const buffer of [
+    rawBuffer, confidenceBuffer, depthA, depthB, maskA, maskB, coverageBuffer,
+    histogramBuffer, resultBuffer, histogramRead, resultRead, coverageRead,
+    contrastParams, ...paramsBuffers,
+  ]) buffer.destroy();
+  return {depth, coverage, processingMs: performance.now() - startedAt};
 }

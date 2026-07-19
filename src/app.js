@@ -1,5 +1,5 @@
 import {G_FRAGMENT_SHADER, G_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
-import {computeCostVolumeGpu} from './depth-gpu.js';
+import {computeCostVolumeGpu, filterDepthMapGpu} from './depth-gpu.js';
 
 'use strict';
 const $ = s => document.querySelector(s);
@@ -1396,7 +1396,7 @@ function chooseDefaults() {
 
 function reprocess(onDone = null) {
   clearTimeout(processTimer);
-  processTimer = setTimeout(() => {
+  processTimer = setTimeout(async () => {
     if (!rawDepth) {
       if (onDone) onDone();
       return;
@@ -1404,7 +1404,19 @@ function reprocess(onDone = null) {
     const sigma = ANALYSIS_SIGMA;
     processedDepth = loadedDepthMap ? rawDepth.slice() :
                                       gaussianBlur(rawDepth, mapW, mapH, sigma);
-    rebuildDepthPreview();
+    let gpuFiltered = null;
+    if (!loadedDepthMap && confMap) {
+      try {
+        gpuFiltered = await filterDepthMapGpu(
+            processedDepth, confMap, mapW, mapH, bgDepth, cropX);
+        if (gpuFiltered)
+          console.info(
+              `Depth WebGPU post: ${gpuFiltered.processingMs.toFixed(0)} ms`);
+      } catch (err) {
+        console.warn('WebGPU depth filtering unavailable, using CPU:', err);
+      }
+    }
+    rebuildDepthPreview(gpuFiltered);
     buildMesh();
     sched();
     if (onDone) onDone();
@@ -1893,7 +1905,7 @@ function weightedMedianDepth(src, mask, confidence, guide, w, h, radius) {
     }
   return out;
 }
-function rebuildDepthPreview() {
+function rebuildDepthPreview(gpuFiltered = null) {
   depthPreview = null;
   depthPreviewW = 0;
   depthPreviewH = 0;
@@ -1902,6 +1914,27 @@ function rebuildDepthPreview() {
   if (!processedDepth || !grayMap || !mapW || !mapH) return;
 
   const w = mapW, h = mapH, shape = currentShape();
+  if (gpuFiltered && gpuFiltered.depth.length === w * h) {
+    cleanDepthMap = gpuFiltered.depth;
+    depthCoverage = gpuFiltered.coverage;
+    const srcW = Math.max(1, w - cropX);
+    depthPreviewW = srcW;
+    depthPreviewH = h;
+    const imgData = depthCtx.createImageData(srcW, h);
+    let o = 0;
+    for (let y = 0; y < h; y++)
+      for (let x = cropX; x < w; x++) {
+        const lin = Math.max(0, Math.min(1, cleanDepthMap[y * w + x]));
+        const shown = (shape > 0 || lin <= 0) ? lin : (1 - lin);
+        const g = Math.max(0, Math.min(255, Math.round(Math.pow(shown, .82) * 255)));
+        imgData.data[o++] = g;
+        imgData.data[o++] = g;
+        imgData.data[o++] = g;
+        imgData.data[o++] = 255;
+      }
+    depthPreview = imgData;
+    return;
+  }
   if (loadedDepthMap) {
     cleanDepthMap = processedDepth.slice();
     depthPreviewW = w;
