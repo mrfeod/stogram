@@ -32,7 +32,7 @@ let img = null, loadedDepthMap = false, textureLoaded = false;
 let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, depthPreview = null, depthPreviewW = 0,
-    depthPreviewH = 0, depthCoverage = null;
+    depthPreviewH = 0, depthCoverage = null, cachedGpuFiltered = null;
 let yaw = -.22, pitch = -.16, zoom = 1, drag = false;
 let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
     lastGestureX = 0, lastGestureY = 0, lastGestureTime = 0,
@@ -1181,6 +1181,7 @@ function uploadTextureImage(image) {
 
 function activateImage(image, url, revokeUrl = false) {
   img = image;
+  cachedGpuFiltered = null;
   loadedDepthMap = false;
   updateSourceModeUi();
   uploadTextureImage(image);
@@ -1263,6 +1264,7 @@ function activateDepthImage(image, url, revokeUrl = false) {
   ctx.drawImage(image, 0, 0);
   const pixels = ctx.getImageData(0, 0, mapW, mapH).data;
   rawDepth = new Float32Array(mapW * mapH);
+  cachedGpuFiltered = null;
   grayMap = new Float32Array(mapW * mapH);
   confMap = new Float32Array(mapW * mapH);
   confMap.fill(1);
@@ -1443,6 +1445,7 @@ function reprocess(onDone = null) {
     }
     processedDepth = rawDepth.slice();
     let gpuFiltered = null;
+    cachedGpuFiltered = null;
     if (!loadedDepthMap && confMap) {
       try {
         gpuFiltered = await filterDepthMapGpu(
@@ -1457,6 +1460,7 @@ function reprocess(onDone = null) {
     }
     if (!loadedDepthMap && !gpuFiltered)
       processedDepth = gaussianBlur(rawDepth, mapW, mapH, ANALYSIS_SIGMA);
+    cachedGpuFiltered = gpuFiltered;
     rebuildDepthPreview(gpuFiltered);
     buildMesh();
     sched();
@@ -1924,7 +1928,7 @@ function depthDisplayValue(depth, shape) {
   const normalized = Math.pow(value, .82);
   return shape > 0 ? normalized : 1 - normalized;
 }
-function rebuildDepthPreview(gpuFiltered = null) {
+function rebuildDepthPreview(gpuFiltered = cachedGpuFiltered) {
   depthPreview = null;
   depthPreviewW = 0;
   depthPreviewH = 0;
