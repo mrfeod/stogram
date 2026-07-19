@@ -1593,7 +1593,28 @@ function buildMesh() {
   const key = `${mapW}:${mapH}:${cropX}:${stepPx}`;
   if (key === surfaceGridKey) return;
   surfaceGridKey = key;
-  const verts = new Float32Array(nx * ny * 5);
+  const topVertexCount = nx * ny;
+  const perimeter = [];
+  const edgeNormal = (gx, gy) => {
+    let x = 0, y = 0;
+    if (gx === 0) x--;
+    if (gx === nx - 1) x++;
+    if (gy === 0) y++;
+    if (gy === ny - 1) y--;
+    const length = Math.hypot(x, y) || 1;
+    return {x: x / length, y: y / length};
+  };
+  for (let gx = 0; gx < nx; gx++)
+    perimeter.push({index: gx, normal: edgeNormal(gx, 0)});
+  for (let gy = 1; gy < ny; gy++)
+    perimeter.push({index: gy * nx + nx - 1, normal: edgeNormal(nx - 1, gy)});
+  for (let gx = nx - 2; gx >= 0; gx--)
+    perimeter.push({index: (ny - 1) * nx + gx, normal: edgeNormal(gx, ny - 1)});
+  for (let gy = ny - 2; gy > 0; gy--)
+    perimeter.push({index: gy * nx, normal: edgeNormal(0, gy)});
+  const sideVertexStart = topVertexCount;
+  const backVertexStart = sideVertexStart + perimeter.length * 2;
+  const verts = new Float32Array((backVertexStart + 4) * 5);
   let o = 0;
   for (let gy = 0; gy < ny; gy++)
     for (let gx = 0; gx < nx; gx++) {
@@ -1603,7 +1624,27 @@ function buildMesh() {
       verts[o++] = 0;
       verts[o++] = 0;
     }
-  const indices = new Uint32Array((nx - 1) * (ny - 1) * 6);
+  for (const edge of perimeter) {
+    const source = edge.index * 5;
+    for (const marker of [-2, -3]) {
+      verts[o++] = verts[source];
+      verts[o++] = verts[source + 1];
+      verts[o++] = marker;
+      verts[o++] = edge.normal.x;
+      verts[o++] = edge.normal.y;
+    }
+  }
+  const cornerTopIndices = [0, nx - 1, (ny - 1) * nx + nx - 1, (ny - 1) * nx];
+  for (const topIndex of cornerTopIndices) {
+    const source = topIndex * 5;
+    verts[o++] = verts[source];
+    verts[o++] = verts[source + 1];
+    verts[o++] = -1;
+    verts[o++] = 0;
+    verts[o++] = 0;
+  }
+  const topIndexCount = (nx - 1) * (ny - 1) * 6;
+  const indices = new Uint32Array(topIndexCount + perimeter.length * 6 + 6);
   let q = 0;
   for (let y = 0; y < ny - 1; y++)
     for (let x = 0; x < nx - 1; x++) {
@@ -1615,6 +1656,27 @@ function buildMesh() {
       indices[q++] = c;
       indices[q++] = d;
     }
+  for (let i = 0; i < perimeter.length; i++) {
+    const next = (i + 1) % perimeter.length;
+    const topA = sideVertexStart + i * 2;
+    const baseA = topA + 1;
+    const topB = sideVertexStart + next * 2;
+    const baseB = topB + 1;
+    indices[q++] = topA;
+    indices[q++] = baseA;
+    indices[q++] = topB;
+    indices[q++] = topB;
+    indices[q++] = baseA;
+    indices[q++] = baseB;
+  }
+  const backTL = backVertexStart, backTR = backVertexStart + 1,
+        backBR = backVertexStart + 2, backBL = backVertexStart + 3;
+  indices[q++] = backTL;
+  indices[q++] = backTR;
+  indices[q++] = backBL;
+  indices[q++] = backTR;
+  indices[q++] = backBR;
+  indices[q++] = backBL;
   meshIndexCount = q;
   meshSourceBounds = {
     minX: -1, maxX: 1,

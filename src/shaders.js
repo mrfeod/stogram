@@ -31,11 +31,6 @@ float livingVoronoi(vec2 uv){
   return 1.0-smoothstep(0.08,0.72,nearest);
 }
 float depthWithVoidPattern(vec2 uv,float sourceDepth){
-  vec2 size=vec2(textureSize(uDepthTex,0)), pixel=uv*size;
-  float left=uSourceCrop*size.x;
-  bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
-      pixel.y<=1.0||pixel.y>=size.y-1.0;
-  if(border) return 0.0;
   float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
   if(sourceDepth>=0.995) return sourceDepth+pattern;
   if(sourceDepth>0.00001) return sourceDepth;
@@ -64,8 +59,15 @@ void main(){
   float depth=mix(cpuDepth,sampledDepth,uUseDepthTex);
   vec2 sampledGradient=vec2(dR-dL,dD-dU)*float(textureSize(uDepthTex,0).x)*0.23;
   vec2 gradient=mix(aGradient*uSign,sampledGradient,uUseDepthTex);
+  bool auxiliary=uUseDepthTex>0.5&&aDepth<-0.5;
+  bool side=auxiliary&&aDepth<-1.5;
+  bool forcedBase=auxiliary&&(aDepth>-1.5||aDepth<-2.5);
+  if(forcedBase) depth=0.0;
   vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
-  vec3 n=normalize(vec3(-gradient.x*uDepthScale,-gradient.y*uDepthScale,1.0));
+  vec3 n;
+  if(side) n=normalize(vec3(aGradient,0.0));
+  else if(auxiliary) n=vec3(0.0,0.0,-1.0);
+  else n=normalize(vec3(-gradient.x*uDepthScale,-gradient.y*uDepthScale,1.0));
   n=normalize(rotate3(n));
   float camDist=3.2;
   float cz=camDist-p.z;
@@ -123,11 +125,6 @@ float livingVoronoi(vec2 uv){
   return 1.0-smoothstep(0.08,0.72,nearest);
 }
 float depthWithVoidPattern(vec2 uv,float sourceDepth){
-  vec2 size=vec2(textureSize(uDepthTex,0)), pixel=uv*size;
-  float left=uSourceCrop*size.x;
-  bool border=pixel.x<=left+1.0||pixel.x>=size.x-1.0||
-      pixel.y<=1.0||pixel.y>=size.y-1.0;
-  if(border) return 0.0;
   float pattern=(5.0+5.0*livingVoronoi(uv))/255.0;
   if(sourceDepth>=0.995) return sourceDepth+pattern;
   if(sourceDepth>0.00001) return sourceDepth;
@@ -147,6 +144,9 @@ void main(){
   sampledDepth=signedMeshDepth(uv,sampledDepth);
   float cpuDepth=uSign<0.0?1.0-aDepth:aDepth;
   float depth=mix(cpuDepth,sampledDepth,uUseDepthTex);
+  bool auxiliary=uUseDepthTex>0.5&&aDepth<-0.5;
+  bool forcedBase=auxiliary&&(aDepth>-1.5||aDepth<-2.5);
+  if(forcedBase) depth=0.0;
   vec3 p=rotate3(vec3(aXY,depth*uDepthScale));
   gl_Position=uLightVP*vec4(p,1.0);
 }`;
