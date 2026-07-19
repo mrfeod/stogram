@@ -1,4 +1,5 @@
 import {G_FRAGMENT_SHADER, G_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
+import {computeCostVolumeGpu} from './depth-gpu.js';
 
 'use strict';
 const $ = s => document.querySelector(s);
@@ -134,7 +135,7 @@ function disparityWorkerMain() {
   }
   onmessage = e => {
     const startedAt = performance.now();
-    const {id, grayBuffer, w, h, p} = e.data;
+    const {id, grayBuffer, packedCostsBuffer, wordsPerPixel, w, h, p} = e.data;
     const gray = new Float32Array(grayBuffer);
     const maxDisp = Math.max(4, Math.min(Math.floor(p * .34), 42));
     const minDisp = -Math.max(2, Math.floor(p * .08));
@@ -144,11 +145,20 @@ function disparityWorkerMain() {
     // has a valid previous repeat, but crop the result by exactly one period.
     const xStart = p - minDisp + 2, xEnd = w - 3,
           validW = Math.max(1, xEnd - xStart);
-    const pixels = validW * h, census = new Uint32Array(w * h);
-    // 5x5 Census descriptor: local ordering is much less sensitive to the
-    // source texture brightness.
-    for (let y = 2; y < h - 2; y++)
-      for (let x = 2; x < w - 2; x++) {
+    const pixels = validW * h;
+    let costs, usedGpuCosts = false;
+    if (packedCostsBuffer && wordsPerPixel > 0) {
+      const packed = new Uint32Array(packedCostsBuffer);
+      costs = new Uint8Array(pixels * dispCount);
+      for (let pi = 0; pi < pixels; pi++) {
+        const packedOffset = pi * wordsPerPixel,
+              costOffset = pi * dispCount;
+        for (let di = 0; di < dispCount; di++)
+          costs[costOffset + di] =
+              (packed[packedOffset + (di >> 2)] >>> ((di & 3) * 8)) & 255;
+      }
+      function censusAt(x, y) {
+        if (x < 2 || x >= w - 2 || y < 2 || y >= h - 2) return 0;
         const center = gray[y * w + x];
         let bits = 0, bit = 0;
         for (let yy = -2; yy <= 2; yy++)
@@ -157,23 +167,68 @@ function disparityWorkerMain() {
             if (gray[(y + yy) * w + x + xx] < center) bits |= (1 << bit);
             bit++;
           }
-        census[y * w + x] = bits >>> 0;
+        return bits >>> 0;
       }
-    const costs = new Uint8Array(pixels * dispCount);
-    for (let y = 0; y < h; y++)
-      for (let vx = 0; vx < validW; vx++) {
-        const x = xStart + vx, pi = y * validW + vx, a = census[y * w + x];
-        for (let di = 0; di < dispCount; di++) {
-          const d = minDisp + di, qx = x - (p - d), b = census[y * w + qx];
-          const censusCost = popcount32(a ^ b);
-          const intensityCost =
-              Math.min(8, Math.abs(gray[y * w + x] - gray[y * w + qx]) / 12);
-          costs[pi * dispCount + di] =
-              Math.min(31, Math.round(censusCost + intensityCost));
+      let valid = packed.length === pixels * wordsPerPixel;
+      const stepY = Math.max(1, Math.floor(Math.max(1, h - 4) / 12)),
+            stepX = Math.max(1, Math.floor(validW / 12));
+      for (let y = 2; valid && y < h - 2; y += stepY)
+        for (let vx = 0; valid && vx < validW; vx += stepX) {
+          const x = xStart + vx, pi = y * validW + vx,
+                a = censusAt(x, y);
+          for (let di = 0; di < dispCount; di++) {
+            const d = minDisp + di, qx = x - (p - d),
+                  censusCost = popcount32(a ^ censusAt(qx, y)),
+                  intensityCost = Math.min(
+                      8, Math.abs(gray[y * w + x] - gray[y * w + qx]) / 12),
+                  expected =
+                      Math.min(31, Math.round(censusCost + intensityCost));
+            if (costs[pi * dispCount + di] !== expected) {
+              valid = false;
+              break;
+            }
+          }
         }
-        if ((y & 63) === 0 && vx === 0)
-          postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
+      if (valid) {
+        usedGpuCosts = true;
+        postProgress(id, .28, 'Распаковка WebGPU cost volume…');
+      } else {
+        costs = null;
+        postProgress(id, .10, 'Проверка WebGPU не пройдена, CPU fallback…');
       }
+    }
+    if (!costs) {
+      const census = new Uint32Array(w * h);
+      // 5x5 Census descriptor: local ordering is much less sensitive to the
+      // source texture brightness.
+      for (let y = 2; y < h - 2; y++)
+        for (let x = 2; x < w - 2; x++) {
+          const center = gray[y * w + x];
+          let bits = 0, bit = 0;
+          for (let yy = -2; yy <= 2; yy++)
+            for (let xx = -2; xx <= 2; xx++) {
+              if (xx === 0 && yy === 0) continue;
+              if (gray[(y + yy) * w + x + xx] < center) bits |= (1 << bit);
+              bit++;
+            }
+          census[y * w + x] = bits >>> 0;
+        }
+      costs = new Uint8Array(pixels * dispCount);
+      for (let y = 0; y < h; y++)
+        for (let vx = 0; vx < validW; vx++) {
+          const x = xStart + vx, pi = y * validW + vx, a = census[y * w + x];
+          for (let di = 0; di < dispCount; di++) {
+            const d = minDisp + di, qx = x - (p - d), b = census[y * w + qx];
+            const censusCost = popcount32(a ^ b);
+            const intensityCost =
+                Math.min(8, Math.abs(gray[y * w + x] - gray[y * w + qx]) / 12);
+            costs[pi * dispCount + di] =
+                Math.min(31, Math.round(censusCost + intensityCost));
+          }
+          if ((y & 63) === 0 && vx === 0)
+            postProgress(id, .10 + .18 * y / h, 'Census cost volume…');
+        }
+    }
     const aggregate = new Uint16Array(costs.length);
     let prev = new Float32Array(dispCount), cur = new Float32Array(dispCount);
     function addPath(startX, startY, dx, dy) {
@@ -391,6 +446,7 @@ function disparityWorkerMain() {
           id,
           bgDepth,
           cropX,
+          usedGpuCosts,
           processingMs: performance.now() - startedAt,
           rawDepth: rawDepth.buffer,
           confMap: confMap.buffer
@@ -1224,13 +1280,25 @@ async function analyze() {
   await recoverDepth(gray, w, h, p, job);
 }
 
-function recoverDepth(gray, w, h, p, existingJob = null) {
+async function recoverDepth(gray, w, h, p, existingJob = null) {
+  const totalStartedAt = performance.now();
   const job = existingJob ?? ++analysisJob;
   if (disparityWorker) {
     disparityWorker.terminate();
     disparityWorker = null;
   }
-  setProgress(.08, 'Расчёт смещения…');
+  let gpuCosts = null;
+  try {
+    setProgress(.08, 'WebGPU Census и cost volume…');
+    gpuCosts = await computeCostVolumeGpu(gray, w, h, p);
+    if (gpuCosts)
+      console.info(`Depth WebGPU: ${gpuCosts.processingMs.toFixed(0)} ms`);
+  } catch (err) {
+    console.warn('WebGPU depth prepass unavailable, using CPU:', err);
+    gpuCosts = null;
+  }
+  if (job !== analysisJob) return;
+  setProgress(gpuCosts ? .28 : .08, 'Расчёт смещения…');
   disparityWorker = createDisparityWorker();
   return new Promise((resolve, reject) => {
     const worker = disparityWorker;
@@ -1251,7 +1319,11 @@ function recoverDepth(gray, w, h, p, existingJob = null) {
         confMap = new Float32Array(m.confMap);
         bgDepth = m.bgDepth;
         cropX = m.cropX;
-        console.info(`Depth worker: ${m.processingMs.toFixed(0)} ms`);
+        console.info(
+            `Depth worker: ${m.processingMs.toFixed(0)} ms ` +
+            `(${m.usedGpuCosts ? 'WebGPU costs' : 'CPU costs'})`);
+        console.info(
+            `Depth total: ${(performance.now() - totalStartedAt).toFixed(0)} ms`);
         worker.terminate();
         if (disparityWorker === worker) disparityWorker = null;
         setProgress(.97, 'Постобработка и построение поверхности…');
@@ -1269,8 +1341,14 @@ function recoverDepth(gray, w, h, p, existingJob = null) {
       reject(err);
     };
     const grayCopy = gray.slice();
-    worker.postMessage(
-        {id: job, grayBuffer: grayCopy.buffer, w, h, p}, [grayCopy.buffer]);
+    const message = {id: job, grayBuffer: grayCopy.buffer, w, h, p};
+    const transfers = [grayCopy.buffer];
+    if (gpuCosts) {
+      message.packedCostsBuffer = gpuCosts.packedCosts;
+      message.wordsPerPixel = gpuCosts.wordsPerPixel;
+      transfers.push(gpuCosts.packedCosts);
+    }
+    worker.postMessage(message, transfers);
   });
 }
 
