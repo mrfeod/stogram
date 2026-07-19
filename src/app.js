@@ -1493,12 +1493,18 @@ function reprocess(onDone = null) {
 
 function buildMesh() {
   if (!processedDepth) return;
-  const stepPx = MESH_STEP_PX;
+  const mode = currentViewMode();
+  // Sub-pixel tessellation lets the vertex shader sample the linearly filtered
+  // depth texture between source pixels instead of reproducing its staircase.
+  // Cap the grid near one million vertices for large imported depth maps.
+  const surfacePixels = Math.max(1, (mapW - cropX) * mapH);
+  const surfaceStep = Math.max(0.5, Math.sqrt(surfacePixels / 1000000));
+  const stepPx = mode === 'surface' ? surfaceStep : MESH_STEP_PX;
   const xs = axisValues(cropX, mapW, stepPx), ys = axisValues(0, mapH, stepPx);
   const nx = xs.length, ny = ys.length;
   const visibleW = Math.max(1, mapW - 1 - cropX),
         centerX = (cropX + mapW - 1) * .5;
-  const sign = currentShape(), mode = currentViewMode();
+  const sign = currentShape();
 
   if (mode === 'layers') {
     surfaceUsesDepthTexture = false;
