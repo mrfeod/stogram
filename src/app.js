@@ -2836,8 +2836,9 @@ function render() {
     return;
   }
   if (!processedDepth || !meshIndexCount) return;
+  const layersMode = currentViewMode() === 'layers';
   const lightVP = computeLightVP();
-  renderShadowMap(lightVP);
+  if (!layersMode) renderShadowMap(lightVP);
   renderGBuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, litFbo);
   gl.viewport(0, 0, cv.width, cv.height);
@@ -2866,7 +2867,7 @@ function render() {
   gl.uniform1f(LU.ambient, lp.ambient);
   gl.uniform1f(LU.diffuse, lp.diffuse);
   gl.uniform1f(LU.fill, lp.fill);
-  gl.uniform1f(LU.shadowStrength, lp.shadowStrength);
+  gl.uniform1f(LU.shadowStrength, layersMode ? 0 : lp.shadowStrength);
   gl.uniform1f(LU.selfShade, lp.selfShade);
   gl.uniform1f(LU.specular, lp.specular);
   gl.uniform1f(LU.shininess, lp.shininess);
@@ -2889,7 +2890,7 @@ function render() {
   const cssPixelScale = cv.width /
       Math.max(1, stage.getBoundingClientRect().width);
   gl.uniform1f(
-      DU.maxBlur, currentViewMode() === 'layers' ? 5 * cssPixelScale : 0);
+      DU.maxBlur, layersMode ? 5 * cssPixelScale : 0);
   gl.uniform1fv(DU.layerDepths, layerDofDepths);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.bindVertexArray(null);

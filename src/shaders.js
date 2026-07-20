@@ -268,14 +268,10 @@ void main(){
   float mask=texture(uLayerMasks,vec3(clamp(vMaskUV,0.0,1.0),float(vLayerIndex))).r;
   float edgeWidth=max(fwidth(mask)*1.35,1.0/255.0);
   float coverage=smoothstep(0.5-edgeWidth,0.5+edgeWidth,mask);
-  const float bayer[16]=float[16](
-      0.0,8.0,2.0,10.0,
-      12.0,4.0,14.0,6.0,
-      3.0,11.0,1.0,9.0,
-      15.0,7.0,13.0,5.0);
-  ivec2 pixel=ivec2(mod(floor(gl_FragCoord.xy),4.0));
-  float threshold=(bayer[pixel.y*4+pixel.x]+0.5)/16.0;
-  if(coverage<threshold) discard;
+  // Screen-door dithering forms a visible 4x4 grid once a layer is minified.
+  // The mask texture already has filtered mip levels, so a stable threshold
+  // gives a cleaner distant silhouette without a repeating screen pattern.
+  if(coverage<0.5) discard;
   vec2 uv=clamp(vSourceUV,0.0,1.0),texel=1.0/vec2(textureSize(uSourceTex,0));
   vec3 center=texture(uSourceTex,uv).rgb;
   vec3 neighbours=(texture(uSourceTex,uv+vec2(texel.x,0)).rgb+
@@ -375,7 +371,9 @@ void main(){
   vec3 L=normalize(uLightDir);
   vec3 V=normalize(uCameraPos-worldPos);
   float ndl=max(dot(N,L),0.0);
-  float shadow=shadowFactor(worldPos,N,L);
+  // Layer cards deliberately do not cast shadows. Besides matching their
+  // photographic look, this branch avoids 25 shadow-map taps per pixel.
+  float shadow=uShadowStrength>0.001?shadowFactor(worldPos,N,L):0.0;
   float selfShade=0.0;
   if(uSelfShade>0.0){
     float curvature=clamp((length(dFdx(N))+length(dFdy(N)))*2.0,0.0,1.0);
@@ -413,7 +411,9 @@ void main(){
   // the blur assigned to a plane.
   float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
   float curve=1.0-exp(-delta*7.0);
-  float radius=uMaxBlur*curve*curve;
+  float cameraDistance=length(vec3(0.0,0.0,3.2)-centerPosition.xyz);
+  float distanceFactor=clamp(cameraDistance/3.2,0.7,1.6);
+  float radius=uMaxBlur*curve*curve*distanceFactor;
   if(radius<0.15){
     outColor=vec4(centerColor,1.0);
     return;
@@ -421,20 +421,16 @@ void main(){
   vec3 sum=vec3(0.0);
   float weightSum=0.0;
   float centerDepth=uLayerDepths[layerIndex];
-  // A regular 5x5 Gaussian kernel avoids the visible grain produced by the
-  // former sparse nine-tap pattern. Its footprint still grows up to radius.
-  for(int y=-2;y<=2;y++){
-    for(int x=-2;x<=2;x++){
+  for(int y=-1;y<=1;y++){
+    for(int x=-1;x<=1;x++){
       vec2 offset=vec2(float(x),float(y));
       vec2 sampleUV=clamp(
-          vUV+offset*uTexel*(radius*0.5),vec2(0.0),vec2(1.0));
+          vUV+offset*uTexel*(radius*0.7),vec2(0.0),vec2(1.0));
       vec4 samplePosition=texture(uPositionTex,sampleUV);
       if(samplePosition.a<0.5) continue;
       int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
-      // Reject a farther plane at a foreground silhouette using local stack
-      // depth. This remains stable when the whole construction is rotated.
       float farther=max(0.0,centerDepth-uLayerDepths[sampleLayer]);
-      float spatialWeight=exp(-dot(offset,offset)*0.5);
+      float spatialWeight=exp(-dot(offset,offset)*0.75);
       float depthWeight=exp(-farther*80.0);
       float weight=spatialWeight*depthWeight;
       sum+=texture(uColorTex,sampleUV).rgb*weight;
