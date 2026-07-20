@@ -49,8 +49,18 @@
 
       <label class="range">↕︎ <input id="depth" type="range" min="0" max="220" step="1" value="35"><input id="depthNum"
           class="num" type="number" step="1" value="35"></label>
-      <label class="range">≡ <input id="layers" type="range" min="2" max="12" step="1" value="5"><input id="layersNum"
-          class="num" type="number" step="1" value="5"></label>
+      <label class="range" hidden>≡ <input id="layers" type="range" min="16" max="16" step="1" value="16"><input id="layersNum"
+          class="num" type="number" step="1" value="16"></label>
+      <label class="range" hidden>✂ <input id="fragmentCleanup" type="range" min="2" max="2" step="1" value="2"><input id="fragmentCleanupNum"
+          class="num" type="number" step="1" value="2"></label>
+      <label class="range layer-morph" hidden title="Предварительное сжатие маски слоя, px">⊖₁ <input id="layerPreErode" type="range" min="0" max="24" step="1" value="2"><input id="layerPreErodeNum"
+          class="num" type="number" min="0" max="24" step="1" value="2" aria-label="Предварительное сжатие маски слоя, px"></label>
+      <label class="range layer-morph" hidden title="Расширение маски слоя, px">⊕ <input id="layerDilate" type="range" min="0" max="24" step="1" value="6"><input id="layerDilateNum"
+          class="num" type="number" min="0" max="24" step="1" value="6" aria-label="Расширение маски слоя, px"></label>
+      <label class="range layer-morph" hidden title="Размытие маски слоя, px">≈ <input id="layerBlur" type="range" min="0" max="24" step="1" value="4"><input id="layerBlurNum"
+          class="num" type="number" min="0" max="24" step="1" value="4" aria-label="Размытие маски слоя, px"></label>
+      <label class="range layer-morph" hidden title="Сжатие маски слоя, px">⊖ <input id="layerErode" type="range" min="0" max="24" step="1" value="4"><input id="layerErodeNum"
+          class="num" type="number" min="0" max="24" step="1" value="4" aria-label="Сжатие маски слоя, px"></label>
       <label class="range">↔ <input id="period" type="range" min="1" max="720" step="1" value="90"><input id="periodNum"
           class="num" type="number" step="1" value="90"></label>
       <a class="github-link" href="https://github.com/mrfeod/stogram" target="_blank" rel="noopener noreferrer">GitHub</a>

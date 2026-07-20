@@ -128,6 +128,10 @@
       color: var(--muted)
     }
 
+    .range[hidden] {
+      display: none
+    }
+
     input[type=range] {
       width: 92px;
       height: 22px;

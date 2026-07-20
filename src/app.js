@@ -13,14 +13,25 @@ const downloadDepthBtn = $('#downloadDepth'),
       meshDownloads = $('#meshDownloads'), downloadStlBtn = $('#downloadStl');
 const depthR = $('#depth'), depthN = $('#depthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
+const fragmentCleanupR = $('#fragmentCleanup'),
+      fragmentCleanupN = $('#fragmentCleanupNum');
+const layerPreErodeR = $('#layerPreErode'),
+      layerPreErodeN = $('#layerPreErodeNum'),
+      layerDilateR = $('#layerDilate'), layerDilateN = $('#layerDilateNum'),
+      layerBlurR = $('#layerBlur'), layerBlurN = $('#layerBlurNum'),
+      layerErodeR = $('#layerErode'), layerErodeN = $('#layerErodeNum');
 const periodR = $('#period'), periodN = $('#periodNum');
 const autoBtn = $('#auto');
 const ANALYSIS_SIZE = 512;
 const ANALYSIS_SIGMA = 0.24;
 const MESH_STEP_PX = 2;
+const LAYER_MAX_GRID_HEIGHT = 1024;
+const LAYER_MAX_GRID_PIXELS = 262144;
 const SPECKLE_SIZE = 200;
 const FILL_RADIUS = 8;
 const MEDIAN_RADIUS = 8;
+const MAX_LAYER_COUNT = 16;
+const FIXED_FRAGMENT_CLEANUP = 2;
 const gl = cv.getContext(
     'webgl2',
     {alpha: false, antialias: true, powerPreference: 'high-performance'});
@@ -30,9 +41,10 @@ if (!gl) {
 }
 
 let img = null, loadedDepthMap = false, textureLoaded = false;
+let meshDepthValue = 35;
 let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
-    cleanDepthMap = null, depthPreview = null, depthPreviewW = 0,
+    cleanDepthMap = null, meshDepthMap = null, depthPreview = null, depthPreviewW = 0,
     depthPreviewH = 0, depthCoverage = null, cachedGpuFiltered = null;
 let yaw = -.22, pitch = -.16, zoom = 1, drag = false;
 let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
@@ -43,9 +55,11 @@ let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
 let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
-    analysisJob = 0;
+    analysisJob = 0, layerMorphTimer = 0;
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 const meshDepthBlurCache = new WeakMap();
+let layerHistogramSource = null, layerHistogramPeaks = [],
+    autoLayerCount = true;
 let meshSourceBounds = {minX: -1, maxX: 1, minY: -1, maxY: 1, minD: 0, maxD: 0};
 function setProgress(value, _label) {
   const v = Math.max(0, Math.min(1, Number(value) || 0));
@@ -494,6 +508,9 @@ function currentShape() {
 function currentViewMode() {
   return document.querySelector('input[name="viewmode"]:checked').value;
 }
+function effectiveDepthScale() {
+  return currentViewMode() === 'layers' ? 1 : (+depthR.value || 0) / 100;
+}
 function clampSliderValue(el, v) {
   let n = Number(v);
   if (!Number.isFinite(n)) n = Number(el.value) || 0;
@@ -559,6 +576,15 @@ function axisValues(start, end, step) {
   const a = [];
   for (let v = start; v < end; v += step) a.push(v);
   if (!a.length || a[a.length - 1] !== end - 1) a.push(end - 1);
+  return a;
+}
+function axisValuesByCount(start, end, count) {
+  const length = Math.max(1, end - start), sampleCount = Math.max(
+      1, Math.min(length, Math.round(count)));
+  if (sampleCount === 1) return [start];
+  const a = new Array(sampleCount), span = length - 1;
+  for (let i = 0; i < sampleCount; i++)
+    a[i] = start + Math.round(i * span / (sampleCount - 1));
   return a;
 }
 function sched() {
@@ -887,7 +913,7 @@ function updateMeshBoundsFromVerts(verts) {
 function computeLightVP() {
   const d = lightDirCameraSpace();
   const L = vec3Norm(d.x, d.y, d.z);
-  const requestedScale = (+depthR.value || 0) / 100;
+  const requestedScale = effectiveDepthScale();
   const scale = currentViewMode() === 'layers' ?
       Math.max(0.01, requestedScale) : requestedScale;
   const sign = currentShape();
@@ -970,7 +996,7 @@ function renderShadowMap(lightVP) {
   gl.bindVertexArray(vao);
   gl.uniform1f(SU.yaw, yaw);
   gl.uniform1f(SU.pitch, pitch);
-  gl.uniform1f(SU.depth, (+depthR.value || 0) / 100);
+  gl.uniform1f(SU.depth, effectiveDepthScale());
   gl.uniform1f(SU.sign, currentShape());
   gl.uniform1f(SU.useDepthTex, surfaceUsesDepthTexture ? 1 : 0);
   gl.uniform1f(SU.sourceCrop, cropX / Math.max(1, mapW));
@@ -1000,7 +1026,7 @@ function renderGBuffer() {
   gl.bindVertexArray(vao);
   gl.uniform1f(GU.yaw, yaw);
   gl.uniform1f(GU.pitch, pitch);
-  gl.uniform1f(GU.depth, (+depthR.value || 0) / 100);
+  gl.uniform1f(GU.depth, effectiveDepthScale());
   gl.uniform1f(GU.sign, currentShape());
   gl.uniform1f(GU.zoom, zoom);
   gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
@@ -1076,7 +1102,14 @@ requestAnimationFrame(frame);
 
 function updateLayerUi() {
   const mode = currentViewMode();
+  if (mode === 'layers')
+    setPair(depthR, depthN, 100);
+  else if (mode === 'surface')
+    setPair(depthR, depthN, meshDepthValue);
   layersR.parentElement.classList.toggle('disabled', mode !== 'layers');
+  fragmentCleanupR.parentElement.classList.toggle('disabled', mode !== 'layers');
+  document.querySelectorAll('.layer-morph').forEach(
+      control => control.hidden = true);
   const depthMode = mode === 'depthmap';
   cv.style.display = depthMode ? 'none' : 'block';
   depthCv.style.display = depthMode ? 'block' : 'none';
@@ -1084,7 +1117,7 @@ function updateLayerUi() {
   downloadDepthBtn.disabled = !depthPreview;
   meshDownloads.hidden = mode !== 'surface';
   downloadStlBtn.disabled = !processedDepth;
-  depthR.parentElement.classList.toggle('disabled', depthMode);
+  depthR.parentElement.classList.toggle('disabled', mode !== 'surface');
 }
 updateLayerUi();
 
@@ -1237,6 +1270,8 @@ function uploadTextureImage(image) {
 function activateImage(image, url, revokeUrl = false) {
   img = image;
   cachedGpuFiltered = null;
+  layerHistogramSource = null;
+  autoLayerCount = true;
   loadedDepthMap = false;
   updateSourceModeUi();
   uploadTextureImage(image);
@@ -1305,6 +1340,8 @@ function isGrayscaleImage(image) {
 function activateDepthImage(image, url, revokeUrl = false) {
   img = image;
   loadedDepthMap = true;
+  layerHistogramSource = null;
+  autoLayerCount = true;
   analysisJob++;
   updateSourceModeUi();
   if (disparityWorker) {
@@ -1376,6 +1413,8 @@ async function loadRandomStartupImage() {
 
 async function analyze() {
   if (!img) return;
+  layerHistogramSource = null;
+  autoLayerCount = true;
   const job = ++analysisJob;
   if (disparityWorker) {
     disparityWorker.terminate();
@@ -1523,12 +1562,307 @@ function reprocess(onDone = null) {
   }, 20);
 }
 
+function sharpenDepthMap(source, w, h) {
+  // Normalize every contour against its own local low/high plateaus. Global
+  // histogram modes are intentionally not used here: a soft edge crossing
+  // several global peaks turns them into concentric duplicate contours.
+  const radius = Math.max(2, Math.min(8, Math.round(Math.max(w, h) / 128))),
+        horizontalMin = new Float32Array(source.length),
+        horizontalMax = new Float32Array(source.length),
+        localMin = new Float32Array(source.length),
+        localMax = new Float32Array(source.length),
+        normalized = new Float32Array(source.length), strength = .72;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      let lo = Infinity, hi = -Infinity;
+      for (let xx = Math.max(0, x - radius); xx <= Math.min(w - 1, x + radius); xx++) {
+        const value = source[y * w + xx];
+        lo = Math.min(lo, value);
+        hi = Math.max(hi, value);
+      }
+      horizontalMin[y * w + x] = lo;
+      horizontalMax[y * w + x] = hi;
+    }
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      let lo = Infinity, hi = -Infinity;
+      for (let yy = Math.max(0, y - radius); yy <= Math.min(h - 1, y + radius); yy++) {
+        lo = Math.min(lo, horizontalMin[yy * w + x]);
+        hi = Math.max(hi, horizontalMax[yy * w + x]);
+      }
+      localMin[y * w + x] = lo;
+      localMax[y * w + x] = hi;
+    }
+  for (let i = 0; i < source.length; i++) {
+    const value = Math.max(0, Math.min(1, source[i])),
+          lo = localMin[i], hi = localMax[i], range = hi - lo;
+    if (range < .035) {
+      normalized[i] = value;
+      continue;
+    }
+    const t = Math.max(0, Math.min(1, (value - lo) / range)),
+          edgeT = smoothstep(.22, .78, t), mapped = lo + range * edgeT;
+    normalized[i] = value + (mapped - value) * strength;
+  }
+  return normalized;
+}
+
+function detectDepthHistogramPeaks(source, w, h, maxPeaks = 12) {
+  const histogram = new Float64Array(256);
+  for (let y = 0; y < h; y++)
+    for (let x = cropX; x < w; x++) {
+      const value = Math.max(0, Math.min(1, source[y * w + x]));
+      histogram[Math.round(value * 255)]++;
+    }
+  // A short Gaussian-like convolution suppresses 8-bit quantisation noise
+  // without merging genuinely separate depth modes.
+  const smooth = new Float64Array(256), kernel = [1, 4, 7, 10, 13, 10, 7, 4, 1],
+        kernelSum = kernel.reduce((sum, value) => sum + value, 0);
+  for (let i = 0; i < 256; i++) {
+    let sum = 0, weight = 0;
+    for (let k = -4; k <= 4; k++) {
+      const bin = i + k;
+      if (bin < 0 || bin > 255) continue;
+      sum += histogram[bin] * kernel[k + 4];
+      weight += kernel[k + 4];
+    }
+    smooth[i] = sum / Math.max(1, weight || kernelSum);
+  }
+  let histogramMax = 0;
+  for (const value of smooth) histogramMax = Math.max(histogramMax, value);
+  const candidates = [];
+  for (let i = 0; i < 256; i++) {
+    const leftValue = smooth[Math.max(0, i - 1)],
+          rightValue = smooth[Math.min(255, i + 1)];
+    if (smooth[i] < leftValue || smooth[i] < rightValue) continue;
+    let leftMin = Infinity, rightMin = Infinity;
+    for (let j = Math.max(0, i - 24); j < i; j++)
+      leftMin = Math.min(leftMin, smooth[j]);
+    for (let j = i + 1; j <= Math.min(255, i + 24); j++)
+      rightMin = Math.min(rightMin, smooth[j]);
+    if (!Number.isFinite(leftMin)) leftMin = rightMin;
+    if (!Number.isFinite(rightMin)) rightMin = leftMin;
+    const prominence = smooth[i] - Math.max(leftMin, rightMin),
+          score = prominence * Math.sqrt(Math.max(1, smooth[i]));
+    if (smooth[i] >= histogramMax * .012 && prominence > 0)
+      candidates.push({bin: i, height: smooth[i], prominence, score});
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const selected = [];
+  for (const candidate of candidates) {
+    if (selected.some(peak => Math.abs(peak.bin - candidate.bin) < 7)) continue;
+    selected.push(candidate);
+    if (selected.length >= maxPeaks) break;
+  }
+  if (!selected.length) {
+    let bin = 0;
+    for (let i = 1; i < 256; i++) if (smooth[i] > smooth[bin]) bin = i;
+    selected.push({bin, height: smooth[bin], prominence: smooth[bin], score: 1});
+  }
+  if (selected.length === 1) {
+    let bin = selected[0].bin < 128 ? 255 : 0;
+    for (let i = 0; i < 256; i++)
+      if (Math.abs(i - selected[0].bin) >= 16 && smooth[i] > smooth[bin]) bin = i;
+    selected.push({bin, height: smooth[bin], prominence: 0, score: 0});
+  }
+  const strongFloor = Math.max(histogramMax * .025, 1),
+        strong = selected.filter(
+            peak => peak.height >= histogramMax * .035 &&
+                peak.prominence >= strongFloor * .35).length,
+        defaultCount = Math.max(2, Math.min(selected.length, strong || 2));
+  return {peaks: selected, defaultCount};
+}
+
+function chooseLayerPeaks(peaks, count) {
+  const target = Math.max(1, count), selected = peaks.slice(0, target);
+  // Sparse histograms may contain fewer pronounced modes than requested.
+  // Fill the largest gaps so the renderer still receives the selected count.
+  while (selected.length < target) {
+    let bestBin = 0, bestDistance = -1;
+    for (let bin = 0; bin <= 255; bin++) {
+      const distance = selected.length ? Math.min(...selected.map(
+          peak => Math.abs(peak.bin - bin))) : 256;
+      if (distance > bestDistance) {
+        bestDistance = distance;
+        bestBin = bin;
+      }
+    }
+    selected.push({bin: bestBin, height: 0, prominence: 0, score: 0});
+  }
+  return selected.slice(0, target).sort((a, b) => a.bin - b.bin);
+}
+
+function morphLayerMask(src, w, h, radius, dilate) {
+  radius = Math.max(0, Math.round(radius));
+  if (!radius) return src.slice();
+  const tmp = new Uint8Array(src.length), out = new Uint8Array(src.length),
+        rowPrefix = new Int32Array(w + 1), colPrefix = new Int32Array(h + 1);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    rowPrefix[0] = 0;
+    for (let x = 0; x < w; x++)
+      rowPrefix[x + 1] = rowPrefix[x] + src[row + x];
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius),
+            sum = rowPrefix[x1 + 1] - rowPrefix[x0];
+      tmp[row + x] = dilate ? +(sum > 0) : +(sum === x1 - x0 + 1);
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    colPrefix[0] = 0;
+    for (let y = 0; y < h; y++)
+      colPrefix[y + 1] = colPrefix[y] + tmp[y * w + x];
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius),
+            sum = colPrefix[y1 + 1] - colPrefix[y0];
+      out[y * w + x] = dilate ? +(sum > 0) : +(sum === y1 - y0 + 1);
+    }
+  }
+  return out;
+}
+
+function boxBlurLayerMask(src, w, h, radius) {
+  radius = Math.max(0, Math.round(radius));
+  if (!radius) return Float32Array.from(src);
+  const tmp = new Float32Array(src.length), out = new Float32Array(src.length),
+        rowPrefix = new Int32Array(w + 1), colPrefix = new Float32Array(h + 1);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    rowPrefix[0] = 0;
+    for (let x = 0; x < w; x++)
+      rowPrefix[x + 1] = rowPrefix[x] + src[row + x];
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
+      tmp[row + x] =
+          (rowPrefix[x1 + 1] - rowPrefix[x0]) / (x1 - x0 + 1);
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    colPrefix[0] = 0;
+    for (let y = 0; y < h; y++)
+      colPrefix[y + 1] = colPrefix[y] + tmp[y * w + x];
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
+      out[y * w + x] =
+          (colPrefix[y1 + 1] - colPrefix[y0]) / (y1 - y0 + 1);
+    }
+  }
+  return out;
+}
+
+function filterLayerMask(mask, w, h) {
+  let filtered = morphLayerMask(mask, w, h, +layerPreErodeR.value, false);
+  filtered = morphLayerMask(filtered, w, h, +layerDilateR.value, true);
+  const blurred = boxBlurLayerMask(filtered, w, h, +layerBlurR.value);
+  filtered = new Uint8Array(mask.length);
+  for (let i = 0; i < filtered.length; i++) filtered[i] = +(blurred[i] >= .5);
+  filtered = morphLayerMask(filtered, w, h, +layerErodeR.value, false);
+  mask.set(filtered);
+}
+
+function removeSmallMaskComponents(mask, w, h, minArea, minThickness = 3) {
+  const radius = Math.max(0, Math.ceil((minThickness - 1) * .5));
+  if (radius > 0) {
+    const core = new Uint8Array(mask.length), opened = new Uint8Array(mask.length);
+    // Cross erosion finds genuinely thick pixels but is gentler on diagonals
+    // than a square kernel.
+    for (let y = radius; y < h - radius; y++)
+      for (let x = radius; x < w - radius; x++) {
+        const index = y * w + x;
+        if (!mask[index]) continue;
+        let thick = true;
+        for (let d = 1; d <= radius; d++)
+          if (!mask[index - d] || !mask[index + d] ||
+              !mask[index - d * w] || !mask[index + d * w]) {
+            thick = false;
+            break;
+          }
+        if (thick) core[index] = 1;
+      }
+    // Restore the body near its core, constrained by the original component.
+    // A long thin branch has no nearby core and therefore stays removed.
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const index = y * w + x;
+        if (!mask[index]) continue;
+        let restore = false;
+        for (let yy = Math.max(0, y - radius);
+             yy <= Math.min(h - 1, y + radius) && !restore; yy++) {
+          const remaining = radius - Math.abs(yy - y);
+          for (let xx = Math.max(0, x - remaining);
+               xx <= Math.min(w - 1, x + remaining); xx++)
+            if (core[yy * w + xx]) {
+              restore = true;
+              break;
+            }
+        }
+        if (restore) opened[index] = 1;
+      }
+    mask.set(opened);
+  }
+  const seen = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || seen[start]) continue;
+    let head = 0, tail = 0;
+    queue[tail++] = start;
+    seen[start] = 1;
+    while (head < tail) {
+      const index = queue[head++], x = index % w, y = (index / w) | 0;
+      for (let direction = 0; direction < 4; direction++) {
+        const nx = x + (direction === 0 ? -1 : direction === 1 ? 1 : 0),
+              ny = y + (direction === 2 ? -1 : direction === 3 ? 1 : 0);
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+        const next = ny * w + nx;
+        if (!mask[next] || seen[next]) continue;
+        seen[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+    let hasCore = radius === 0;
+    for (let i = 0; i < tail && !hasCore; i++) {
+      const index = queue[i], x = index % w, y = (index / w) | 0;
+      if (x < radius || x >= w - radius || y < radius || y >= h - radius)
+        continue;
+      hasCore = true;
+      for (let d = 1; d <= radius; d++)
+        if (!mask[index - d] || !mask[index + d] ||
+            !mask[index - d * w] || !mask[index + d * w]) {
+          hasCore = false;
+          break;
+        }
+    }
+    if (tail < minArea || !hasCore)
+      for (let i = 0; i < tail; i++) mask[queue[i]] = 0;
+  }
+}
+
 function buildMesh() {
   if (!processedDepth) return;
   downloadStlBtn.disabled = false;
   const mode = currentViewMode();
+  // Layers need pixel-accurate masks to avoid staircase silhouettes, but a
+  // full-resolution grid becomes prohibitively expensive on large images.
+  // Keep a 1:1 grid up to 1024 rows, then resample uniformly instead of
+  // jumping abruptly from every pixel to every second pixel.
   const stepPx = MESH_STEP_PX;
-  const xs = axisValues(cropX, mapW, stepPx), ys = axisValues(0, mapH, stepPx);
+  let xs, ys;
+  if (mode === 'layers') {
+    let ySamples = Math.min(mapH, LAYER_MAX_GRID_HEIGHT),
+        scale = ySamples / Math.max(1, mapH),
+        xSamples = Math.max(
+            1, Math.round(Math.max(1, mapW - cropX) * scale));
+    const gridPixels = xSamples * ySamples;
+    if (gridPixels > LAYER_MAX_GRID_PIXELS) {
+      const areaScale = Math.sqrt(LAYER_MAX_GRID_PIXELS / gridPixels);
+      xSamples = Math.max(1, Math.floor(xSamples * areaScale));
+      ySamples = Math.max(1, Math.floor(ySamples * areaScale));
+    }
+    xs = axisValuesByCount(cropX, mapW, xSamples);
+    ys = axisValuesByCount(0, mapH, ySamples);
+  } else {
+    xs = axisValues(cropX, mapW, stepPx);
+    ys = axisValues(0, mapH, stepPx);
+  }
   const nx = xs.length, ny = ys.length;
   const visibleW = Math.max(1, mapW - 1 - cropX),
         centerX = (cropX + mapW - 1) * .5;
@@ -1544,30 +1878,85 @@ function buildMesh() {
         cleanDepthMap :
         processedDepth;
     const depthAt = (x, y) => Math.max(0, layerSource[y * mapW + x]);
-    const requested = Math.max(2, +layersR.value || 5);
-    let maxLevel = 0;
-    for (let gy = 0; gy < ny; gy++)
-      for (let gx = 0; gx < nx; gx++)
-        maxLevel = Math.max(maxLevel, depthAt(xs[gx], ys[gy]));
-    const levels = [];
-    for (let i = 0; i < requested; i++)
-      levels.push(maxLevel * (i / Math.max(1, requested - 1)));
-
+    if (layerHistogramSource !== layerSource) {
+      const detected = detectDepthHistogramPeaks(
+          layerSource, mapW, mapH, MAX_LAYER_COUNT);
+      layerHistogramSource = layerSource;
+      layerHistogramPeaks = detected.peaks;
+      setPair(layersR, layersN, MAX_LAYER_COUNT);
+      console.info(
+          `Depth peaks: ${detected.peaks.map(peak => peak.bin).sort((a, b) => a - b).join(', ')}; ` +
+          `default layers: ${detected.defaultCount}`);
+    }
+    const requested = MAX_LAYER_COUNT,
+          chosenPeaks = chooseLayerPeaks(layerHistogramPeaks, requested),
+          levels = chosenPeaks.map(peak => peak.bin / 255);
     const layerCount = levels.length;
     const vertsPerLayer = nx * ny;
     const verts = new Float32Array(layerCount * vertsPerLayer * 5);
     const indices =
         new Uint32Array(Math.max(0, layerCount * (nx - 1) * (ny - 1) * 6));
-    const eps = 1e-5, concave = sign < 0, masks = [];
-    for (let li = 0; li < layerCount; li++) {
-      const level = levels[li], mask = new Uint8Array(nx * ny);
-      for (let gy = 0; gy < ny; gy++) {
-        const y = ys[gy];
-        for (let gx = 0; gx < nx; gx++) {
-          const d = depthAt(xs[gx], y);
-          if (concave ? d <= level + eps : d >= level - eps)
-            mask[gy * nx + gx] = 1;
+    const concave = sign < 0, masks = [], localCopies = 2,
+          anchors = new Uint8Array(nx * ny);
+    for (let gy = 0; gy < ny; gy++)
+      for (let gx = 0; gx < nx; gx++) {
+        const index = gy * nx + gx, depth = depthAt(xs[gx], ys[gy]);
+        // Directional quantisation: when a level disappears, attach its
+        // samples to the next plane toward the viewer, never toward the rear
+        // background. Concave mode reverses the depth direction.
+        let anchor = concave ? 0 : layerCount - 1;
+        if (concave) {
+          for (let li = layerCount - 1; li >= 0; li--)
+            if (levels[li] <= depth) {
+              anchor = li;
+              break;
+            }
+        } else {
+          for (let li = 0; li < layerCount; li++)
+            if (levels[li] >= depth) {
+              anchor = li;
+              break;
+            }
         }
+        anchors[index] = anchor;
+      }
+    const backgroundLayer = concave ? layerCount - 1 : 0,
+          rearObjectLayer = concave ? layerCount - 2 : 1;
+    for (let li = 0; li < layerCount; li++) {
+      const mask = new Uint8Array(nx * ny);
+      // The rearmost object plane is visually indistinguishable from the
+      // complete background. Merge it into that plane instead of drawing two
+      // coincident surfaces (which would also cause z-fighting).
+      if (li === rearObjectLayer) {
+        masks.push(mask);
+        continue;
+      }
+      if (li === backgroundLayer) {
+        mask.fill(1);
+        masks.push(mask);
+        continue;
+      }
+      for (let gy = 0; gy < ny; gy++) {
+        for (let gx = 0; gx < nx; gx++) {
+          const index = gy * nx + gx, anchor = anchors[index];
+          // The rear plane is always complete. Every other sample occupies
+          // its nearest histogram plane and at most one plane behind it, so a
+          // contour cannot turn into a long accordion.
+          const included = li === backgroundLayer || (concave ?
+              li >= anchor && li <= Math.min(
+                  layerCount - 2, anchor + localCopies - 1) :
+              li <= anchor && li >= Math.max(1, anchor - localCopies + 1));
+          if (included) mask[index] = 1;
+        }
+      }
+      const cleanup = FIXED_FRAGMENT_CLEANUP;
+      if (li !== backgroundLayer) {
+        filterLayerMask(mask, nx, ny);
+        if (cleanup > 0)
+          removeSmallMaskComponents(
+              mask, nx, ny,
+              Math.max(1, Math.round(nx * ny * .0012 * cleanup / 3)),
+              cleanup);
       }
       masks.push(mask);
     }
@@ -1587,13 +1976,46 @@ function buildMesh() {
         }
       }
       const mask = masks[li];
-      for (let y = 0; y < ny - 1; y++)
+      if (li === backgroundLayer) {
+        const topLeft = baseVertex,
+              topRight = baseVertex + nx - 1,
+              bottomLeft = baseVertex + (ny - 1) * nx,
+              bottomRight = bottomLeft + nx - 1;
+        indices[iq++] = topLeft;
+        indices[iq++] = bottomLeft;
+        indices[iq++] = topRight;
+        indices[iq++] = topRight;
+        indices[iq++] = bottomLeft;
+        indices[iq++] = bottomRight;
+        continue;
+      }
+      for (let y = 0; y < ny - 1; y++) {
+        let runStart = -1;
+        const flushRun = endX => {
+          if (runStart < 0) return;
+          const topLeft = baseVertex + y * nx + runStart,
+                topRight = baseVertex + y * nx + endX,
+                bottomLeft = topLeft + nx,
+                bottomRight = baseVertex + (y + 1) * nx + endX;
+          indices[iq++] = topLeft;
+          indices[iq++] = bottomLeft;
+          indices[iq++] = topRight;
+          indices[iq++] = topRight;
+          indices[iq++] = bottomLeft;
+          indices[iq++] = bottomRight;
+          runStart = -1;
+        };
         for (let x = 0; x < nx - 1; x++) {
           const a = baseVertex + y * nx + x, b = a + 1,
                 c = a + nx, d = c + 1;
           const m00 = mask[y * nx + x], m10 = mask[y * nx + x + 1],
                 m01 = mask[(y + 1) * nx + x],
                 m11 = mask[(y + 1) * nx + x + 1];
+          if (m00 && m10 && m01 && m11) {
+            if (runStart < 0) runStart = x;
+            continue;
+          }
+          flushRun(x);
           if (m00 && m01 && m10) {
             indices[iq++] = a;
             indices[iq++] = c;
@@ -1605,6 +2027,8 @@ function buildMesh() {
             indices[iq++] = d;
           }
         }
+        flushRun(nx - 1);
+      }
     }
     meshIndexCount = iq;
     updateMeshBoundsFromVerts(verts);
@@ -1618,8 +2042,8 @@ function buildMesh() {
   // Surface mode uses a permanent regular grid. Depth and gradients are read
   // in both geometry passes from an R16F texture, so changing depth no longer
   // rebuilds or uploads the vertex buffer.
-  const surfaceSource = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
-      cleanDepthMap :
+  const surfaceSource = (meshDepthMap && meshDepthMap.length === mapW * mapH) ?
+      meshDepthMap :
       processedDepth;
   let surfaceMap = meshDepthBlurCache.get(surfaceSource);
   if (!surfaceMap) {
@@ -2060,12 +2484,14 @@ function rebuildDepthPreview(gpuFiltered = cachedGpuFiltered) {
   depthPreviewW = 0;
   depthPreviewH = 0;
   cleanDepthMap = null;
+  meshDepthMap = null;
   depthCoverage = null;
   if (!processedDepth || !grayMap || !mapW || !mapH) return;
 
   const w = mapW, h = mapH, shape = currentShape();
   if (gpuFiltered && gpuFiltered.depth.length === w * h) {
-    cleanDepthMap = gpuFiltered.depth;
+    meshDepthMap = gpuFiltered.depth;
+    cleanDepthMap = sharpenDepthMap(meshDepthMap, w, h);
     depthCoverage = null;
     const srcW = Math.max(1, w - cropX);
     depthPreviewW = srcW;
@@ -2086,7 +2512,8 @@ function rebuildDepthPreview(gpuFiltered = cachedGpuFiltered) {
     return;
   }
   if (loadedDepthMap) {
-    cleanDepthMap = processedDepth.slice();
+    meshDepthMap = processedDepth.slice();
+    cleanDepthMap = sharpenDepthMap(meshDepthMap, w, h);
     depthPreviewW = w;
     depthPreviewH = h;
     const imgData = depthCtx.createImageData(w, h);
@@ -2154,10 +2581,8 @@ function rebuildDepthPreview(gpuFiltered = cachedGpuFiltered) {
   const lo = nz.length ? percentile(nz, .01) : 0;
   const hi = nz.length ? Math.max(lo + .02, percentile(nz, .99)) : 1;
   const inv = 1 / Math.max(1e-6, hi - lo);
-  cleanDepthMap = new Float32Array(w * h);
+  const normalizedDepth = new Float32Array(w * h);
   const srcW = Math.max(1, w - cropX), srcH = h;
-  const imgData = depthCtx.createImageData(srcW, srcH);
-  let o = 0;
   for (let y = 0; y < h; y++)
     for (let x = cropX; x < w; x++) {
       const i = y * w + x, value = clean[i];
@@ -2170,8 +2595,15 @@ function rebuildDepthPreview(gpuFiltered = cachedGpuFiltered) {
         stretched = .28 * Math.pow(shadow, .72);
       }
       const lin = stretched * alpha;
-      cleanDepthMap[y * w + x] = lin;
-      const t = depthDisplayValue(lin, shape);
+      normalizedDepth[y * w + x] = lin;
+    }
+  meshDepthMap = normalizedDepth;
+  cleanDepthMap = sharpenDepthMap(meshDepthMap, w, h);
+  const imgData = depthCtx.createImageData(srcW, srcH);
+  let o = 0;
+  for (let y = 0; y < h; y++)
+    for (let x = cropX; x < w; x++) {
+      const t = depthDisplayValue(cleanDepthMap[y * w + x], shape);
       const g = Math.max(0, Math.min(255, Math.round(t * 255)));
       imgData.data[o++] = g;
       imgData.data[o++] = g;
@@ -2242,8 +2674,8 @@ function downloadBlob(blob, filename) {
 
 function makeSurfaceExportGeometry() {
   if (!processedDepth || !mapW || !mapH) return null;
-  const source = (cleanDepthMap && cleanDepthMap.length === mapW * mapH) ?
-      cleanDepthMap : processedDepth;
+  const source = (meshDepthMap && meshDepthMap.length === mapW * mapH) ?
+      meshDepthMap : processedDepth;
   let surface = meshDepthBlurCache.get(source);
   if (!surface) {
     surface = gaussianBlur(source, mapW, mapH, 2.0);
@@ -2253,7 +2685,7 @@ function makeSurfaceExportGeometry() {
         ys = axisValues(0, mapH, MESH_STEP_PX), nx = xs.length, ny = ys.length,
         visibleW = Math.max(1, mapW - 1 - cropX),
         centerX = (cropX + mapW - 1) * .5,
-        scale = (+depthR.value || 0) / 100, inverted = currentShape() < 0,
+        scale = effectiveDepthScale(), inverted = currentShape() < 0,
         vertices = new Array(nx * ny);
   for (let gy = 0; gy < ny; gy++)
     for (let gx = 0; gx < nx; gx++) {
@@ -2379,6 +2811,11 @@ function render() {
 // UI events
 syncPair(depthR, depthN);
 syncPair(layersR, layersN);
+syncPair(fragmentCleanupR, fragmentCleanupN);
+syncPair(layerPreErodeR, layerPreErodeN);
+syncPair(layerDilateR, layerDilateN);
+syncPair(layerBlurR, layerBlurN);
+syncPair(layerErodeR, layerErodeN);
 syncPair(periodR, periodN);
 setPair(depthR, depthN, 35);
 updateAutoButton();
@@ -2419,13 +2856,38 @@ addEventListener('drop', e => {
 });
 periodR.onchange = () => {
   if (loadedDepthMap || !grayMap || !mapW || !mapH) return;
+  layerHistogramSource = null;
+  autoLayerCount = true;
   recoverDepth(grayMap, mapW, mapH, +periodR.value).catch(err => {
     console.error(err);
     hideProgress();
   });
 };
-depthR.oninput = sched;
-layersR.oninput = reprocess;
+depthR.oninput = () => {
+  if (currentViewMode() === 'surface') meshDepthValue = +depthR.value || 0;
+  sched();
+};
+layersR.oninput = () => {
+  autoLayerCount = false;
+  buildMesh();
+  sched();
+};
+fragmentCleanupR.oninput = () => {
+  buildMesh();
+  sched();
+};
+const scheduleLayerMorph = () => {
+  clearTimeout(layerMorphTimer);
+  layerMorphTimer = setTimeout(() => {
+    if (currentViewMode() !== 'layers') return;
+    buildMesh();
+    sched();
+  }, 60);
+};
+layerPreErodeR.oninput = scheduleLayerMorph;
+layerDilateR.oninput = scheduleLayerMorph;
+layerBlurR.oninput = scheduleLayerMorph;
+layerErodeR.oninput = scheduleLayerMorph;
 document.querySelectorAll('input[name="shape"]')
     .forEach(el => el.onchange = () => {
       rebuildDepthPreview();
