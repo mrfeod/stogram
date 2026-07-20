@@ -1,4 +1,4 @@
-import {G_FRAGMENT_SHADER, G_VERTEX_SHADER, LAYER_G_FRAGMENT_SHADER, LAYER_G_VERTEX_SHADER, LAYER_SHADOW_FRAGMENT_SHADER, LAYER_SHADOW_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
+import {DOF_FRAGMENT_SHADER, G_FRAGMENT_SHADER, G_VERTEX_SHADER, LAYER_G_FRAGMENT_SHADER, LAYER_G_VERTEX_SHADER, LAYER_SHADOW_FRAGMENT_SHADER, LAYER_SHADOW_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
 import {computeCostVolumeGpu, filterDepthMapGpu} from './depth-gpu.js';
 
 'use strict';
@@ -55,7 +55,8 @@ let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
 let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0, layerMorphTimer = 0;
-let layerInstanceCount = 0, layerLevels = new Float32Array(16);
+let layerInstanceCount = 0, layerLevels = new Float32Array(16),
+    layerDofDepths = new Float32Array(16);
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 const meshDepthBlurCache = new WeakMap();
 let layerHistogramSource = null, layerHistogramPeaks = [],
@@ -664,6 +665,7 @@ const layerShadowProg =
     program(LAYER_SHADOW_VERTEX_SHADER, LAYER_SHADOW_FRAGMENT_SHADER);
 
 const lightProg = program(LIGHT_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER);
+const dofProg = program(LIGHT_VERTEX_SHADER, DOF_FRAGMENT_SHADER);
 
 const vao = gl.createVertexArray(), vbo = gl.createBuffer(),
       ebo = gl.createBuffer();
@@ -771,6 +773,13 @@ const LU = {
   pcfRadius: gl.getUniformLocation(lightProg, 'uPcfRadius'),
   shadowHardness: gl.getUniformLocation(lightProg, 'uShadowHardness')
 };
+const DU = {
+  color: gl.getUniformLocation(dofProg, 'uColorTex'),
+  position: gl.getUniformLocation(dofProg, 'uPositionTex'),
+  texel: gl.getUniformLocation(dofProg, 'uTexel'),
+  maxBlur: gl.getUniformLocation(dofProg, 'uMaxBlur'),
+  layerDepths: gl.getUniformLocation(dofProg, 'uLayerDepths[0]')
+};
 
 gl.getExtension('EXT_color_buffer_float');
 gl.enable(gl.DEPTH_TEST);
@@ -831,6 +840,7 @@ const gAlbedoTex = gl.createTexture();
 const gNormalTex = gl.createTexture();
 const gPositionTex = gl.createTexture();
 const gDepthRb = gl.createRenderbuffer();
+const litFbo = gl.createFramebuffer(), litTex = gl.createTexture();
 function initRenderTex(tex, internalFormat, format, type) {
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(
@@ -859,6 +869,14 @@ function initGBuffer() {
       gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, gDepthRb);
   gl.drawBuffers(
       [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+  initRenderTex(litTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  gl.bindTexture(gl.TEXTURE_2D, litTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, litFbo);
+  gl.framebufferTexture2D(
+      gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, litTex, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
@@ -2034,12 +2052,18 @@ function buildMesh() {
       masks.push(mask);
     }
 
-    const renderMasks = [], renderLevels = [];
+    const renderEntries = [];
     for (let li = 0; li < layerCount; li++) {
       if (li === rearObjectLayer) continue;
-      renderMasks.push(masks[li]);
-      renderLevels.push(levels[li]);
+      renderEntries.push({
+        mask: masks[li],
+        level: levels[li],
+        signedDepth: sign < 0 ? 1 - levels[li] : levels[li]
+      });
     }
+    renderEntries.sort((a, b) => b.signedDepth - a.signedDepth);
+    const renderMasks = renderEntries.map(entry => entry.mask),
+          renderLevels = renderEntries.map(entry => entry.level);
     const renderLayerCount = renderMasks.length,
           maskPixels = nx * ny,
           maskData = new Uint8Array(maskPixels * renderLayerCount);
@@ -2065,6 +2089,9 @@ function buildMesh() {
     layerLevels.fill(0);
     layerLevels.set(renderLevels);
     layerInstanceCount = renderLayerCount;
+    const signedLevels = renderEntries.map(entry => entry.signedDepth);
+    layerDofDepths.fill(signedLevels[signedLevels.length - 1] || 0);
+    layerDofDepths.set(signedLevels);
     const top = mapH / visibleW,
           bottom = (mapH - 2 * (mapH - 1)) / visibleW,
           quad = new Float32Array([
@@ -2812,7 +2839,7 @@ function render() {
   const lightVP = computeLightVP();
   renderShadowMap(lightVP);
   renderGBuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, litFbo);
   gl.viewport(0, 0, cv.width, cv.height);
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(.045, .05, .06, 1);
@@ -2847,6 +2874,23 @@ function render() {
   gl.uniform1f(LU.biasSlope, lp.biasSlope);
   gl.uniform1f(LU.pcfRadius, lp.pcfRadius);
   gl.uniform1f(LU.shadowHardness, lp.shadowHardness);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, cv.width, cv.height);
+  gl.useProgram(dofProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, litTex);
+  gl.uniform1i(DU.color, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, gPositionTex);
+  gl.uniform1i(DU.position, 1);
+  gl.uniform2f(DU.texel, 1 / cv.width, 1 / cv.height);
+  const cssPixelScale = cv.width /
+      Math.max(1, stage.getBoundingClientRect().width);
+  gl.uniform1f(
+      DU.maxBlur, currentViewMode() === 'layers' ? 5 * cssPixelScale : 0);
+  gl.uniform1fv(DU.layerDepths, layerDofDepths);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.bindVertexArray(null);
   gl.enable(gl.DEPTH_TEST);

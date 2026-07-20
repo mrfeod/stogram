@@ -286,7 +286,7 @@ void main(){
   outAlbedo=vec4(albedo,1.0);
   vec3 faceNormal=gl_FrontFacing?vNormal:-vNormal;
   outNormal=vec4(normalize(faceNormal)*0.5+0.5,1.0);
-  outPosition=vec4(vWorldPos,1.0);
+  outPosition=vec4(vWorldPos,float(vLayerIndex)+1.0);
 }`;
 
 export const LAYER_SHADOW_VERTEX_SHADER = `#version 300 es
@@ -389,4 +389,59 @@ void main(){
   float illumination=uAmbient + uFill + direct - selfShade;
   vec3 color=albedo*illumination + vec3(uSpecular*spec*(1.0-shadowAmount));
   outColor=vec4(clamp(color,0.0,1.0),1.0);
+}`;
+
+export const DOF_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform sampler2D uColorTex;
+uniform sampler2D uPositionTex;
+uniform vec2 uTexel;
+uniform float uMaxBlur;
+uniform float uLayerDepths[16];
+out vec4 outColor;
+void main(){
+  vec4 centerPosition=texture(uPositionTex,vUV);
+  vec3 centerColor=texture(uColorTex,vUV).rgb;
+  if(centerPosition.a<0.5||centerPosition.a<=2.0||uMaxBlur<0.01){
+    outColor=vec4(centerColor,1.0);
+    return;
+  }
+  int layerIndex=clamp(int(centerPosition.a-1.0+0.5),0,15);
+  // Depths are sorted from front to back. Measure the defocus strictly along
+  // the local layer stack, not along camera/world Z, so rotation cannot alter
+  // the blur assigned to a plane.
+  float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
+  float curve=1.0-exp(-delta*7.0);
+  float radius=uMaxBlur*curve*curve;
+  if(radius<0.15){
+    outColor=vec4(centerColor,1.0);
+    return;
+  }
+  vec3 sum=vec3(0.0);
+  float weightSum=0.0;
+  float centerDepth=uLayerDepths[layerIndex];
+  // A regular 5x5 Gaussian kernel avoids the visible grain produced by the
+  // former sparse nine-tap pattern. Its footprint still grows up to radius.
+  for(int y=-2;y<=2;y++){
+    for(int x=-2;x<=2;x++){
+      vec2 offset=vec2(float(x),float(y));
+      vec2 sampleUV=clamp(
+          vUV+offset*uTexel*(radius*0.5),vec2(0.0),vec2(1.0));
+      vec4 samplePosition=texture(uPositionTex,sampleUV);
+      if(samplePosition.a<0.5) continue;
+      int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
+      // Reject a farther plane at a foreground silhouette using local stack
+      // depth. This remains stable when the whole construction is rotated.
+      float farther=max(0.0,centerDepth-uLayerDepths[sampleLayer]);
+      float spatialWeight=exp(-dot(offset,offset)*0.5);
+      float depthWeight=exp(-farther*80.0);
+      float weight=spatialWeight*depthWeight;
+      sum+=texture(uColorTex,sampleUV).rgb*weight;
+      weightSum+=weight;
+    }
+  }
+  vec3 blurred=sum/max(weightSum,1e-5);
+  float amount=smoothstep(0.15,1.0,radius);
+  outColor=vec4(mix(centerColor,blurred,amount),1.0);
 }`;
