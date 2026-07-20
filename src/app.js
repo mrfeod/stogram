@@ -1,4 +1,4 @@
-import {G_FRAGMENT_SHADER, G_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
+import {G_FRAGMENT_SHADER, G_VERTEX_SHADER, LAYER_G_FRAGMENT_SHADER, LAYER_G_VERTEX_SHADER, LAYER_SHADOW_FRAGMENT_SHADER, LAYER_SHADOW_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER, LIGHT_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER, SHADOW_VERTEX_SHADER} from './shaders.js';
 import {computeCostVolumeGpu, filterDepthMapGpu} from './depth-gpu.js';
 
 'use strict';
@@ -25,8 +25,7 @@ const autoBtn = $('#auto');
 const ANALYSIS_SIZE = 512;
 const ANALYSIS_SIGMA = 0.24;
 const MESH_STEP_PX = 2;
-const LAYER_MAX_GRID_HEIGHT = 1024;
-const LAYER_MAX_GRID_PIXELS = 262144;
+const LAYER_MAX_GRID_HEIGHT = 2048;
 const SPECKLE_SIZE = 200;
 const FILL_RADIUS = 8;
 const MEDIAN_RADIUS = 8;
@@ -56,6 +55,7 @@ let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
 let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0, layerMorphTimer = 0;
+let layerInstanceCount = 0, layerLevels = new Float32Array(16);
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 const meshDepthBlurCache = new WeakMap();
 let layerHistogramSource = null, layerHistogramPeaks = [],
@@ -657,8 +657,11 @@ function program(vs, fs) {
   return p;
 }
 const gProg = program(G_VERTEX_SHADER, G_FRAGMENT_SHADER);
+const layerGProg = program(LAYER_G_VERTEX_SHADER, LAYER_G_FRAGMENT_SHADER);
 
 const shadowProg = program(SHADOW_VERTEX_SHADER, SHADOW_FRAGMENT_SHADER);
+const layerShadowProg =
+    program(LAYER_SHADOW_VERTEX_SHADER, LAYER_SHADOW_FRAGMENT_SHADER);
 
 const lightProg = program(LIGHT_VERTEX_SHADER, LIGHT_FRAGMENT_SHADER);
 
@@ -686,6 +689,13 @@ gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 gl.bindVertexArray(null);
 gl.bindBuffer(gl.ARRAY_BUFFER, null);
+const layerVao = gl.createVertexArray(), layerVbo = gl.createBuffer();
+gl.bindVertexArray(layerVao);
+gl.bindBuffer(gl.ARRAY_BUFFER, layerVbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(6 * 5), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 5 * 4, 0);
+gl.bindVertexArray(null);
 
 const GU = {
   yaw: gl.getUniformLocation(gProg, 'uYaw'),
@@ -715,6 +725,31 @@ const SU = {
   patternTime: gl.getUniformLocation(shadowProg, 'uPatternTime'),
   backPass: gl.getUniformLocation(shadowProg, 'uBackPass')
 };
+const LGU = {
+  yaw: gl.getUniformLocation(layerGProg, 'uYaw'),
+  pitch: gl.getUniformLocation(layerGProg, 'uPitch'),
+  depth: gl.getUniformLocation(layerGProg, 'uDepthScale'),
+  sign: gl.getUniformLocation(layerGProg, 'uSign'),
+  zoom: gl.getUniformLocation(layerGProg, 'uZoom'),
+  aspect: gl.getUniformLocation(layerGProg, 'uAspect'),
+  sourceCrop: gl.getUniformLocation(layerGProg, 'uSourceCrop'),
+  sourceAspect: gl.getUniformLocation(layerGProg, 'uSourceAspect'),
+  backPass: gl.getUniformLocation(layerGProg, 'uBackPass'),
+  levels: gl.getUniformLocation(layerGProg, 'uLayerLevels[0]'),
+  sourceTex: gl.getUniformLocation(layerGProg, 'uSourceTex'),
+  masks: gl.getUniformLocation(layerGProg, 'uLayerMasks')
+};
+const LSU = {
+  yaw: gl.getUniformLocation(layerShadowProg, 'uYaw'),
+  pitch: gl.getUniformLocation(layerShadowProg, 'uPitch'),
+  depth: gl.getUniformLocation(layerShadowProg, 'uDepthScale'),
+  sign: gl.getUniformLocation(layerShadowProg, 'uSign'),
+  sourceAspect: gl.getUniformLocation(layerShadowProg, 'uSourceAspect'),
+  backPass: gl.getUniformLocation(layerShadowProg, 'uBackPass'),
+  levels: gl.getUniformLocation(layerShadowProg, 'uLayerLevels[0]'),
+  lightVP: gl.getUniformLocation(layerShadowProg, 'uLightVP'),
+  masks: gl.getUniformLocation(layerShadowProg, 'uLayerMasks')
+};
 const LU = {
   albedo: gl.getUniformLocation(lightProg, 'uAlbedoTex'),
   normal: gl.getUniformLocation(lightProg, 'uNormalTex'),
@@ -743,6 +778,7 @@ gl.depthFunc(gl.LEQUAL);
 gl.disable(gl.CULL_FACE);
 gl.clearColor(.045, .05, .06, 1);
 const sourceTex = gl.createTexture();
+const layerMaskTex = gl.createTexture();
 const anisotropyExt = gl.getExtension('EXT_texture_filter_anisotropic') ||
     gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic') ||
     gl.getExtension('MOZ_EXT_texture_filter_anisotropic');
@@ -992,6 +1028,27 @@ function renderShadowMap(lightVP) {
   gl.viewport(0, 0, shadowSize, shadowSize);
   gl.clear(gl.DEPTH_BUFFER_BIT);
   gl.colorMask(false, false, false, false);
+  if (currentViewMode() === 'layers' && layerInstanceCount) {
+    gl.useProgram(layerShadowProg);
+    gl.bindVertexArray(layerVao);
+    gl.uniform1f(LSU.yaw, yaw);
+    gl.uniform1f(LSU.pitch, pitch);
+    gl.uniform1f(LSU.depth, effectiveDepthScale());
+    gl.uniform1f(LSU.sign, currentShape());
+    gl.uniform1f(LSU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+    gl.uniform1f(LSU.backPass, 0);
+    gl.uniform1fv(LSU.levels, layerLevels);
+    gl.uniformMatrix4fv(LSU.lightVP, false, lightVP);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, layerMaskTex);
+    gl.uniform1i(LSU.masks, 6);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, layerInstanceCount);
+    gl.bindVertexArray(null);
+    gl.colorMask(true, true, true, true);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, cv.width, cv.height);
+    return;
+  }
   gl.useProgram(shadowProg);
   gl.bindVertexArray(vao);
   gl.uniform1f(SU.yaw, yaw);
@@ -1022,6 +1079,30 @@ function renderGBuffer() {
   gl.viewport(0, 0, cv.width, cv.height);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (currentViewMode() === 'layers' && layerInstanceCount) {
+    gl.useProgram(layerGProg);
+    gl.bindVertexArray(layerVao);
+    gl.uniform1f(LGU.yaw, yaw);
+    gl.uniform1f(LGU.pitch, pitch);
+    gl.uniform1f(LGU.depth, effectiveDepthScale());
+    gl.uniform1f(LGU.sign, currentShape());
+    gl.uniform1f(LGU.zoom, zoom);
+    gl.uniform1f(LGU.aspect, cv.width / Math.max(1, cv.height));
+    gl.uniform1f(LGU.sourceCrop, cropX / Math.max(1, mapW));
+    gl.uniform1f(LGU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+    gl.uniform1f(LGU.backPass, 0);
+    gl.uniform1fv(LGU.levels, layerLevels);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTex);
+    gl.uniform1i(LGU.sourceTex, 4);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, layerMaskTex);
+    gl.uniform1i(LGU.masks, 6);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, layerInstanceCount);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return;
+  }
   gl.useProgram(gProg);
   gl.bindVertexArray(vao);
   gl.uniform1f(GU.yaw, yaw);
@@ -1841,22 +1922,18 @@ function buildMesh() {
   downloadStlBtn.disabled = false;
   const mode = currentViewMode();
   // Layers need pixel-accurate masks to avoid staircase silhouettes, but a
-  // full-resolution grid becomes prohibitively expensive on large images.
-  // Keep a 1:1 grid up to 1024 rows, then resample uniformly instead of
+  // full-resolution grid still makes CPU morphology expensive on huge images.
+  // Keep a 1:1 grid up to 2048 rows, then resample uniformly instead of
   // jumping abruptly from every pixel to every second pixel.
   const stepPx = MESH_STEP_PX;
   let xs, ys;
   if (mode === 'layers') {
-    let ySamples = Math.min(mapH, LAYER_MAX_GRID_HEIGHT),
-        scale = ySamples / Math.max(1, mapH),
-        xSamples = Math.max(
-            1, Math.round(Math.max(1, mapW - cropX) * scale));
-    const gridPixels = xSamples * ySamples;
-    if (gridPixels > LAYER_MAX_GRID_PIXELS) {
-      const areaScale = Math.sqrt(LAYER_MAX_GRID_PIXELS / gridPixels);
-      xSamples = Math.max(1, Math.floor(xSamples * areaScale));
-      ySamples = Math.max(1, Math.floor(ySamples * areaScale));
-    }
+    const textureLimit = gl.getParameter(gl.MAX_TEXTURE_SIZE),
+          ySamples = Math.min(mapH, LAYER_MAX_GRID_HEIGHT, textureLimit),
+          scale = ySamples / Math.max(1, mapH),
+          xSamples = Math.min(
+              textureLimit,
+              Math.max(1, Math.round(Math.max(1, mapW - cropX) * scale)));
     xs = axisValuesByCount(cropX, mapW, xSamples);
     ys = axisValuesByCount(0, mapH, ySamples);
   } else {
@@ -1892,10 +1969,6 @@ function buildMesh() {
           chosenPeaks = chooseLayerPeaks(layerHistogramPeaks, requested),
           levels = chosenPeaks.map(peak => peak.bin / 255);
     const layerCount = levels.length;
-    const vertsPerLayer = nx * ny;
-    const verts = new Float32Array(layerCount * vertsPerLayer * 5);
-    const indices =
-        new Uint32Array(Math.max(0, layerCount * (nx - 1) * (ny - 1) * 6));
     const concave = sign < 0, masks = [], localCopies = 2,
           anchors = new Uint8Array(nx * ny);
     for (let gy = 0; gy < ny; gy++)
@@ -1961,84 +2034,55 @@ function buildMesh() {
       masks.push(mask);
     }
 
-    let vo = 0, iq = 0;
+    const renderMasks = [], renderLevels = [];
     for (let li = 0; li < layerCount; li++) {
-      const level = levels[li], baseVertex = li * vertsPerLayer;
-      for (let gy = 0; gy < ny; gy++) {
-        const y = ys[gy];
-        for (let gx = 0; gx < nx; gx++) {
-          const x = xs[gx];
-          verts[vo++] = (x - centerX) / visibleW * 2;
-          verts[vo++] = (mapH * .5 - y) / visibleW * 2;
-          verts[vo++] = level;
-          verts[vo++] = 0;
-          verts[vo++] = 0;
-        }
-      }
-      const mask = masks[li];
-      if (li === backgroundLayer) {
-        const topLeft = baseVertex,
-              topRight = baseVertex + nx - 1,
-              bottomLeft = baseVertex + (ny - 1) * nx,
-              bottomRight = bottomLeft + nx - 1;
-        indices[iq++] = topLeft;
-        indices[iq++] = bottomLeft;
-        indices[iq++] = topRight;
-        indices[iq++] = topRight;
-        indices[iq++] = bottomLeft;
-        indices[iq++] = bottomRight;
-        continue;
-      }
-      for (let y = 0; y < ny - 1; y++) {
-        let runStart = -1;
-        const flushRun = endX => {
-          if (runStart < 0) return;
-          const topLeft = baseVertex + y * nx + runStart,
-                topRight = baseVertex + y * nx + endX,
-                bottomLeft = topLeft + nx,
-                bottomRight = baseVertex + (y + 1) * nx + endX;
-          indices[iq++] = topLeft;
-          indices[iq++] = bottomLeft;
-          indices[iq++] = topRight;
-          indices[iq++] = topRight;
-          indices[iq++] = bottomLeft;
-          indices[iq++] = bottomRight;
-          runStart = -1;
-        };
-        for (let x = 0; x < nx - 1; x++) {
-          const a = baseVertex + y * nx + x, b = a + 1,
-                c = a + nx, d = c + 1;
-          const m00 = mask[y * nx + x], m10 = mask[y * nx + x + 1],
-                m01 = mask[(y + 1) * nx + x],
-                m11 = mask[(y + 1) * nx + x + 1];
-          if (m00 && m10 && m01 && m11) {
-            if (runStart < 0) runStart = x;
-            continue;
-          }
-          flushRun(x);
-          if (m00 && m01 && m10) {
-            indices[iq++] = a;
-            indices[iq++] = c;
-            indices[iq++] = b;
-          }
-          if (m10 && m01 && m11) {
-            indices[iq++] = b;
-            indices[iq++] = c;
-            indices[iq++] = d;
-          }
-        }
-        flushRun(nx - 1);
-      }
+      if (li === rearObjectLayer) continue;
+      renderMasks.push(masks[li]);
+      renderLevels.push(levels[li]);
     }
-    meshIndexCount = iq;
-    updateMeshBoundsFromVerts(verts);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-    gl.bufferData(
-        gl.ELEMENT_ARRAY_BUFFER, indices.subarray(0, iq), gl.STATIC_DRAW);
+    const renderLayerCount = renderMasks.length,
+          maskPixels = nx * ny,
+          maskData = new Uint8Array(maskPixels * renderLayerCount);
+    for (let li = 0; li < renderLayerCount; li++) {
+      const mask = renderMasks[li], offset = li * maskPixels,
+            // Preserve the thresholded silhouette, but give the shader a
+            // narrow continuous coverage ramp for sub-pixel edge AA.
+            coverage = boxBlurLayerMask(mask, nx, ny, 1);
+      for (let i = 0; i < maskPixels; i++)
+        maskData[offset + i] = Math.round(coverage[i] * 255);
+    }
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, layerMaskTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(
+        gl.TEXTURE_2D_ARRAY, 0, gl.R8, nx, ny, renderLayerCount, 0,
+        gl.RED, gl.UNSIGNED_BYTE, maskData);
+    gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+    gl.texParameteri(
+        gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    layerLevels.fill(0);
+    layerLevels.set(renderLevels);
+    layerInstanceCount = renderLayerCount;
+    const top = mapH / visibleW,
+          bottom = (mapH - 2 * (mapH - 1)) / visibleW,
+          quad = new Float32Array([
+            -1, bottom, 0, 0, 0,  1, bottom, 0, 0, 0,
+            -1, top,    0, 0, 0, -1, top,    0, 0, 0,
+             1, bottom, 0, 0, 0,  1, top,    0, 0, 0,
+          ]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, layerVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    meshIndexCount = 6;
+    meshSourceBounds = {
+      minX: -1, maxX: 1, minY: bottom, maxY: top,
+      minD: Math.min(...renderLevels), maxD: Math.max(...renderLevels)
+    };
     return;
+
   }
+  layerInstanceCount = 0;
   // Surface mode uses a permanent regular grid. Depth and gradients are read
   // in both geometry passes from an R16F texture, so changing depth no longer
   // rebuilds or uploads the vertex buffer.

@@ -221,6 +221,107 @@ export const SHADOW_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 void main(){}`;
 
+export const LAYER_G_VERTEX_SHADER = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aXY;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uBackPass;
+uniform float uLayerLevels[16];
+out vec2 vSourceUV;
+out vec2 vMaskUV;
+out vec3 vNormal;
+out vec3 vWorldPos;
+flat out int vLayerIndex;
+vec3 rotate3(vec3 p){
+  float cy=cos(uYaw),sy=sin(uYaw),cp=cos(uPitch),sp=sin(uPitch);
+  vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
+  return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
+}
+void main(){
+  int layer=gl_InstanceID;
+  float depth=uSign<0.0?1.0-uLayerLevels[layer]:uLayerLevels[layer];
+  float z=depth*max(uDepthScale,0.01)-uBackPass*0.00025;
+  vec3 p=rotate3(vec3(aXY,z));
+  vec3 n=normalize(rotate3(vec3(0.0,0.0,uBackPass>0.5?-1.0:1.0)));
+  float cz=3.2-p.z,f=2.41421356,nearP=.1,farP=30.0,zEye=-cz;
+  float A=(farP+nearP)/(nearP-farP),B=(2.0*farP*nearP)/(nearP-farP);
+  gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
+  vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
+      0.5-aXY.y/(2.0*uSourceAspect));
+  vMaskUV=vec2(aXY.x*0.5+0.5,0.5-aXY.y/(2.0*uSourceAspect));
+  vNormal=n;vWorldPos=p;vLayerIndex=layer;
+}`;
+
+export const LAYER_G_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+in vec2 vSourceUV;
+in vec2 vMaskUV;
+in vec3 vNormal;
+in vec3 vWorldPos;
+flat in int vLayerIndex;
+uniform sampler2D uSourceTex;
+uniform sampler2DArray uLayerMasks;
+layout(location=0) out vec4 outAlbedo;
+layout(location=1) out vec4 outNormal;
+layout(location=2) out vec4 outPosition;
+void main(){
+  float mask=texture(uLayerMasks,vec3(clamp(vMaskUV,0.0,1.0),float(vLayerIndex))).r;
+  float edgeWidth=max(fwidth(mask)*1.35,1.0/255.0);
+  float coverage=smoothstep(0.5-edgeWidth,0.5+edgeWidth,mask);
+  const float bayer[16]=float[16](
+      0.0,8.0,2.0,10.0,
+      12.0,4.0,14.0,6.0,
+      3.0,11.0,1.0,9.0,
+      15.0,7.0,13.0,5.0);
+  ivec2 pixel=ivec2(mod(floor(gl_FragCoord.xy),4.0));
+  float threshold=(bayer[pixel.y*4+pixel.x]+0.5)/16.0;
+  if(coverage<threshold) discard;
+  vec2 uv=clamp(vSourceUV,0.0,1.0),texel=1.0/vec2(textureSize(uSourceTex,0));
+  vec3 center=texture(uSourceTex,uv).rgb;
+  vec3 neighbours=(texture(uSourceTex,uv+vec2(texel.x,0)).rgb+
+      texture(uSourceTex,uv-vec2(texel.x,0)).rgb+
+      texture(uSourceTex,uv+vec2(0,texel.y)).rgb+
+      texture(uSourceTex,uv-vec2(0,texel.y)).rgb)*0.25;
+  vec3 albedo=clamp(center+(center-neighbours)*0.38,0.0,1.0);
+  outAlbedo=vec4(albedo,1.0);
+  vec3 faceNormal=gl_FrontFacing?vNormal:-vNormal;
+  outNormal=vec4(normalize(faceNormal)*0.5+0.5,1.0);
+  outPosition=vec4(vWorldPos,1.0);
+}`;
+
+export const LAYER_SHADOW_VERTEX_SHADER = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aXY;
+uniform float uYaw,uPitch,uDepthScale,uSign,uSourceAspect,uBackPass;
+uniform float uLayerLevels[16];
+uniform mat4 uLightVP;
+out vec2 vMaskUV;
+flat out int vLayerIndex;
+vec3 rotate3(vec3 p){
+  float cy=cos(uYaw),sy=sin(uYaw),cp=cos(uPitch),sp=sin(uPitch);
+  vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
+  return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
+}
+void main(){
+  int layer=gl_InstanceID;
+  float depth=uSign<0.0?1.0-uLayerLevels[layer]:uLayerLevels[layer];
+  float z=depth*max(uDepthScale,0.01)-uBackPass*0.00025;
+  gl_Position=uLightVP*vec4(rotate3(vec3(aXY,z)),1.0);
+  vMaskUV=vec2(aXY.x*0.5+0.5,0.5-aXY.y/(2.0*uSourceAspect));
+  vLayerIndex=layer;
+}`;
+
+export const LAYER_SHADOW_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+in vec2 vMaskUV;
+flat in int vLayerIndex;
+uniform sampler2DArray uLayerMasks;
+void main(){
+  if(texture(uLayerMasks,vec3(clamp(vMaskUV,0.0,1.0),float(vLayerIndex))).r<0.5)
+    discard;
+}`;
+
 export const LIGHT_VERTEX_SHADER = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 aPosition;
