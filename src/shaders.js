@@ -395,9 +395,20 @@ in vec2 vUV;
 uniform sampler2D uColorTex;
 uniform sampler2D uPositionTex;
 uniform vec2 uTexel;
+uniform vec2 uDirection;
 uniform float uMaxBlur;
 uniform float uLayerDepths[16];
 out vec4 outColor;
+float blurRadiusForLayer(vec4 centerPosition,int layerIndex){
+  // Depths are sorted from front to back. Measure the defocus strictly along
+  // the local layer stack, not along camera/world Z, so rotation cannot alter
+  // the blur assigned to a plane.
+  float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
+  float curve=1.0-exp(-delta*7.0);
+  float cameraDistance=length(vec3(0.0,0.0,3.2)-centerPosition.xyz);
+  float distanceFactor=clamp(cameraDistance/3.2,0.7,1.6);
+  return uMaxBlur*curve*curve*distanceFactor;
+}
 void main(){
   vec4 centerPosition=texture(uPositionTex,vUV);
   vec3 centerColor=texture(uColorTex,vUV).rgb;
@@ -406,32 +417,35 @@ void main(){
     return;
   }
   int layerIndex=clamp(int(centerPosition.a-1.0+0.5),0,15);
-  // Depths are sorted from front to back. Measure the defocus strictly along
-  // the local layer stack, not along camera/world Z, so rotation cannot alter
-  // the blur assigned to a plane.
-  float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
-  float curve=1.0-exp(-delta*7.0);
-  float cameraDistance=length(vec3(0.0,0.0,3.2)-centerPosition.xyz);
-  float distanceFactor=clamp(cameraDistance/3.2,0.7,1.6);
-  float radius=uMaxBlur*curve*curve*distanceFactor;
+  float radius=blurRadiusForLayer(centerPosition,layerIndex);
   if(radius<0.15){
     outColor=vec4(centerColor,1.0);
     return;
   }
-  vec3 sum=vec3(0.0);
-  float weightSum=0.0;
+  vec2 axis=uDirection*uTexel*max(radius/5.0,1.0);
   float centerDepth=uLayerDepths[layerIndex];
-  for(int y=-1;y<=1;y++){
-    for(int x=-1;x<=1;x++){
-      vec2 offset=vec2(float(x),float(y));
+  float sigma=max(radius*0.6,0.65);
+  vec3 sum=centerColor;
+  float weightSum=1.0;
+  // A sparse 3x3 kernel leaves large unsampled gaps on high-frequency
+  // stereogram textures, which shows up as tiled ghost copies instead of blur.
+  // Blur along each axis with dense Gaussian taps so the footprint stays smooth
+  // as the radius changes with zoom and camera distance.
+  for(int i=1;i<=5;i++){
+    float stepIndex=float(i);
+    float pixelOffset=stepIndex*max(radius/5.0,1.0);
+    float spatialWeight=exp(-0.5*pixelOffset*pixelOffset/(sigma*sigma));
+    for(int side=-1;side<=1;side+=2){
       vec2 sampleUV=clamp(
-          vUV+offset*uTexel*(radius*0.7),vec2(0.0),vec2(1.0));
+          vUV+axis*stepIndex*float(side),vec2(0.0),vec2(1.0));
       vec4 samplePosition=texture(uPositionTex,sampleUV);
       if(samplePosition.a<0.5) continue;
       int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
-      float farther=max(0.0,centerDepth-uLayerDepths[sampleLayer]);
-      float spatialWeight=exp(-dot(offset,offset)*0.75);
-      float depthWeight=exp(-farther*80.0);
+      float sampleDepth=uLayerDepths[sampleLayer];
+      float inFront=max(0.0,sampleDepth-centerDepth);
+      if(inFront>1e-4) continue;
+      float behind=max(0.0,centerDepth-sampleDepth);
+      float depthWeight=exp(-behind*80.0);
       float weight=spatialWeight*depthWeight;
       sum+=texture(uColorTex,sampleUV).rgb*weight;
       weightSum+=weight;
