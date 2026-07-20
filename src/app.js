@@ -777,6 +777,7 @@ const DU = {
   color: gl.getUniformLocation(dofProg, 'uColorTex'),
   position: gl.getUniformLocation(dofProg, 'uPositionTex'),
   texel: gl.getUniformLocation(dofProg, 'uTexel'),
+  direction: gl.getUniformLocation(dofProg, 'uDirection'),
   maxBlur: gl.getUniformLocation(dofProg, 'uMaxBlur'),
   layerDepths: gl.getUniformLocation(dofProg, 'uLayerDepths[0]')
 };
@@ -841,6 +842,7 @@ const gNormalTex = gl.createTexture();
 const gPositionTex = gl.createTexture();
 const gDepthRb = gl.createRenderbuffer();
 const litFbo = gl.createFramebuffer(), litTex = gl.createTexture();
+const dofTempFbo = gl.createFramebuffer(), dofTempTex = gl.createTexture();
 function initRenderTex(tex, internalFormat, format, type) {
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(
@@ -876,6 +878,14 @@ function initGBuffer() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, litFbo);
   gl.framebufferTexture2D(
       gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, litTex, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  initRenderTex(dofTempTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  gl.bindTexture(gl.TEXTURE_2D, dofTempTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dofTempFbo);
+  gl.framebufferTexture2D(
+      gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dofTempTex, 0);
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
@@ -2889,10 +2899,25 @@ function render() {
   gl.uniform2f(DU.texel, 1 / cv.width, 1 / cv.height);
   const cssPixelScale = cv.width /
       Math.max(1, stage.getBoundingClientRect().width);
-  gl.uniform1f(
-      DU.maxBlur, layersMode ? 5 * cssPixelScale : 0);
+  const layeredMaxBlur = layersMode ? 5 * cssPixelScale : 0;
+  gl.uniform1f(DU.maxBlur, layeredMaxBlur);
   gl.uniform1fv(DU.layerDepths, layerDofDepths);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  if (layersMode && layeredMaxBlur > 0) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dofTempFbo);
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.uniform2f(DU.direction, 1, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, dofTempTex);
+    gl.uniform1i(DU.color, 0);
+    gl.uniform2f(DU.direction, 0, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  } else {
+    gl.uniform2f(DU.direction, 1, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
   gl.bindVertexArray(null);
   gl.enable(gl.DEPTH_TEST);
 }
