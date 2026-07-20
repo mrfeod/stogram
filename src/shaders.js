@@ -399,15 +399,13 @@ uniform vec2 uDirection;
 uniform float uMaxBlur;
 uniform float uLayerDepths[16];
 out vec4 outColor;
-float blurRadiusForLayer(vec4 centerPosition,int layerIndex){
+float blurRadiusForLayer(int layerIndex){
   // Depths are sorted from front to back. Measure the defocus strictly along
   // the local layer stack, not along camera/world Z, so rotation cannot alter
   // the blur assigned to a plane.
   float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
   float curve=1.0-exp(-delta*7.0);
-  float cameraDistance=length(vec3(0.0,0.0,3.2)-centerPosition.xyz);
-  float distanceFactor=clamp(cameraDistance/3.2,0.7,1.6);
-  return uMaxBlur*curve*curve*distanceFactor;
+  return uMaxBlur*curve*curve;
 }
 void main(){
   vec4 centerPosition=texture(uPositionTex,vUV);
@@ -417,7 +415,7 @@ void main(){
     return;
   }
   int layerIndex=clamp(int(centerPosition.a-1.0+0.5),0,15);
-  float radius=blurRadiusForLayer(centerPosition,layerIndex);
+  float radius=blurRadiusForLayer(layerIndex);
   if(radius<0.15){
     outColor=vec4(centerColor,1.0);
     return;
@@ -430,7 +428,7 @@ void main(){
   // A sparse 3x3 kernel leaves large unsampled gaps on high-frequency
   // stereogram textures, which shows up as tiled ghost copies instead of blur.
   // Blur along each axis with dense Gaussian taps so the footprint stays smooth
-  // as the radius changes with zoom and camera distance.
+  // as the radius changes across layers.
   for(int i=1;i<=5;i++){
     float stepIndex=float(i);
     float pixelOffset=stepIndex*max(radius/5.0,1.0);
