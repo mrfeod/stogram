@@ -4,6 +4,7 @@ layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec2 aGradient;
 uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uPatternTime,uBackPass;
+uniform float uCameraDistance,uFov;
 uniform sampler2D uDepthTex;
 uniform float uUseDepthTex;
 out vec2 vSourceUV;
@@ -80,9 +81,9 @@ void main(){
   vLocalNormal=n;
   vLocalZ=localZ;
   n=normalize(rotate3(n));
-  float camDist=3.2;
+  float camDist=uCameraDistance;
   float cz=camDist-p.z;
-  float f=2.41421356;
+  float f=1.0/tan(radians(uFov)*0.5);
   float nearP=.1, farP=30.0;
   float zEye=-cz;
   float A=(farP+nearP)/(nearP-farP);
@@ -225,6 +226,7 @@ export const LAYER_G_VERTEX_SHADER = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 aXY;
 uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uBackPass;
+uniform float uCameraDistance,uFov,uOrthographic;
 uniform float uLayerLevels[16];
 out vec2 vSourceUV;
 out vec2 vMaskUV;
@@ -242,7 +244,19 @@ void main(){
   float z=depth*max(uDepthScale,0.01)-uBackPass*0.00025;
   vec3 p=rotate3(vec3(aXY,z));
   vec3 n=normalize(rotate3(vec3(0.0,0.0,uBackPass>0.5?-1.0:1.0)));
-  float cz=3.2-p.z,f=2.41421356,nearP=.1,farP=30.0,zEye=-cz;
+  if(uOrthographic>0.5){
+    // Match the apparent scale of the default 45 degree / 3.2 perspective
+    // camera, while keeping every layer equally large regardless of depth.
+    float orthoScale=0.75444174*uZoom;
+    gl_Position=vec4(p.x*orthoScale/uAspect,p.y*orthoScale,-p.z*0.5,1.0);
+    vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
+        0.5-aXY.y/(2.0*uSourceAspect));
+    vMaskUV=vec2(aXY.x*0.5+0.5,0.5-aXY.y/(2.0*uSourceAspect));
+    vNormal=n;vWorldPos=p;vLayerIndex=layer;
+    return;
+  }
+  float cz=uCameraDistance-p.z,f=1.0/tan(radians(uFov)*0.5);
+  float nearP=.1,farP=30.0,zEye=-cz;
   float A=(farP+nearP)/(nearP-farP),B=(2.0*farP*nearP)/(nearP-farP);
   gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
   vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
@@ -395,49 +409,104 @@ in vec2 vUV;
 uniform sampler2D uColorTex;
 uniform sampler2D uPositionTex;
 uniform vec2 uTexel;
+uniform vec2 uDirection;
 uniform float uMaxBlur;
+uniform int uFinalPass;
+uniform int uFocusLayers;
+uniform float uCurveRate,uCurvePower,uSigmaScale,uSigmaMin;
+uniform float uDepthFalloff,uMixStart,uMixEnd;
 uniform float uLayerDepths[16];
 out vec4 outColor;
-void main(){
-  vec4 centerPosition=texture(uPositionTex,vUV);
-  vec3 centerColor=texture(uColorTex,vUV).rgb;
-  if(centerPosition.a<0.5||centerPosition.a<=2.0||uMaxBlur<0.01){
-    outColor=vec4(centerColor,1.0);
-    return;
-  }
-  int layerIndex=clamp(int(centerPosition.a-1.0+0.5),0,15);
+float blurRadiusForLayer(int layerIndex){
   // Depths are sorted from front to back. Measure the defocus strictly along
   // the local layer stack, not along camera/world Z, so rotation cannot alter
   // the blur assigned to a plane.
-  float delta=max(0.0,uLayerDepths[1]-uLayerDepths[layerIndex]);
-  float curve=1.0-exp(-delta*7.0);
-  float cameraDistance=length(vec3(0.0,0.0,3.2)-centerPosition.xyz);
-  float distanceFactor=clamp(cameraDistance/3.2,0.7,1.6);
-  float radius=uMaxBlur*curve*curve*distanceFactor;
-  if(radius<0.15){
-    outColor=vec4(centerColor,1.0);
+  int focusIndex=clamp(uFocusLayers-1,0,15);
+  float delta=max(0.0,uLayerDepths[focusIndex]-uLayerDepths[layerIndex]);
+  float curve=1.0-exp(-delta*uCurveRate);
+  return uMaxBlur*pow(max(curve,0.0),uCurvePower);
+}
+float radiusAt(vec4 position){
+  if(position.a<0.5) return 0.0;
+  int layerIndex=clamp(int(position.a-1.0+0.5),0,15);
+  if(layerIndex<uFocusLayers) return 0.0;
+  return blurRadiusForLayer(layerIndex);
+}
+void main(){
+  vec4 centerPosition=texture(uPositionTex,vUV);
+  vec4 centerSample=texture(uColorTex,vUV);
+  bool centerGeometry=centerPosition.a>=0.5;
+  int layerIndex=centerGeometry?
+      clamp(int(centerPosition.a-1.0+0.5),0,15):0;
+  float centerCoverage=uFinalPass==0?(centerGeometry?1.0:0.0):centerSample.a;
+  if(centerGeometry&&centerPosition.a<=float(uFocusLayers)){
+    outColor=uFinalPass==0?vec4(centerSample.rgb,1.0):
+        vec4(centerSample.rgb+vec3(0.045,0.05,0.06)*(1.0-centerSample.a),1.0);
     return;
   }
-  vec3 sum=vec3(0.0);
-  float weightSum=0.0;
-  float centerDepth=uLayerDepths[layerIndex];
-  for(int y=-1;y<=1;y++){
-    for(int x=-1;x<=1;x++){
-      vec2 offset=vec2(float(x),float(y));
-      vec2 sampleUV=clamp(
-          vUV+offset*uTexel*(radius*0.7),vec2(0.0),vec2(1.0));
-      vec4 samplePosition=texture(uPositionTex,sampleUV);
-      if(samplePosition.a<0.5) continue;
-      int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
-      float farther=max(0.0,centerDepth-uLayerDepths[sampleLayer]);
-      float spatialWeight=exp(-dot(offset,offset)*0.75);
-      float depthWeight=exp(-farther*80.0);
-      float weight=spatialWeight*depthWeight;
-      sum+=texture(uColorTex,sampleUV).rgb*weight;
-      weightSum+=weight;
+  float radius=radiusAt(centerPosition);
+  // Outside a card there is no center depth from which to derive a radius.
+  // Gather the largest nearby circle of confusion so a blurred silhouette can
+  // extend into empty space instead of being clipped by the original mask.
+  if(!centerGeometry){
+    for(int i=-5;i<=5;i++){
+      vec2 probeUV=clamp(vUV+uDirection*uTexel*uMaxBlur*float(i)/5.0,
+          vec2(0.0),vec2(1.0));
+      radius=max(radius,radiusAt(texture(uPositionTex,probeUV)));
     }
   }
-  vec3 blurred=sum/max(weightSum,1e-5);
-  float amount=smoothstep(0.15,1.0,radius);
-  outColor=vec4(mix(centerColor,blurred,amount),1.0);
+  if(radius<uMixStart){
+    if(uFinalPass==0)
+      outColor=vec4(centerSample.rgb*centerCoverage,centerCoverage);
+    else
+      outColor=vec4(centerSample.rgb+
+          vec3(0.045,0.05,0.06)*(1.0-centerSample.a),1.0);
+    return;
+  }
+  vec2 axis=uDirection*uTexel*max(radius/5.0,1.0);
+  float centerDepth=centerGeometry?uLayerDepths[layerIndex]:0.0;
+  float sigma=max(radius*uSigmaScale,uSigmaMin);
+  vec3 sum=vec3(0.0);
+  float alphaSum=0.0;
+  float kernelWeightSum=0.0;
+  // A sparse 3x3 kernel leaves large unsampled gaps on high-frequency
+  // stereogram textures, which shows up as tiled ghost copies instead of blur.
+  // Blur along each axis with dense Gaussian taps so the footprint stays smooth
+  // as the radius changes across layers.
+  for(int i=-5;i<=5;i++){
+    float stepIndex=float(i);
+    float pixelOffset=abs(stepIndex)*max(radius/5.0,1.0);
+    float spatialWeight=exp(-0.5*pixelOffset*pixelOffset/(sigma*sigma));
+    vec2 sampleUV=clamp(vUV+axis*stepIndex,vec2(0.0),vec2(1.0));
+    vec4 samplePosition=texture(uPositionTex,sampleUV);
+    vec4 colorSample=texture(uColorTex,sampleUV);
+    float coverage=uFinalPass==0?(samplePosition.a>=0.5?1.0:0.0):colorSample.a;
+    float depthWeight=1.0;
+    if(centerGeometry&&samplePosition.a>=0.5){
+      int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
+      float sampleDepth=uLayerDepths[sampleLayer];
+      float inFront=max(0.0,sampleDepth-centerDepth);
+      if(inFront>1e-4) coverage=0.0;
+      float behind=max(0.0,centerDepth-sampleDepth);
+      depthWeight=exp(-behind*uDepthFalloff);
+    }
+    float weight=spatialWeight*depthWeight;
+    vec3 premultiplied=uFinalPass==0?
+        colorSample.rgb*coverage:colorSample.rgb;
+    sum+=premultiplied*weight;
+    alphaSum+=coverage*weight;
+    kernelWeightSum+=weight;
+  }
+  vec3 blurred=sum/max(kernelWeightSum,1e-5);
+  float blurredCoverage=alphaSum/max(kernelWeightSum,1e-5);
+  float amount=smoothstep(uMixStart,max(uMixStart+0.001,uMixEnd),radius);
+  vec3 centerPremultiplied=uFinalPass==0?
+      centerSample.rgb*centerCoverage:centerSample.rgb;
+  vec3 premultiplied=mix(centerPremultiplied,blurred,amount);
+  float coverage=mix(centerCoverage,blurredCoverage,amount);
+  if(uFinalPass==0)
+    outColor=vec4(premultiplied,coverage);
+  else
+    outColor=vec4(premultiplied+
+        vec3(0.045,0.05,0.06)*(1.0-coverage),1.0);
 }`;

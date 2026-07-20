@@ -21,6 +21,25 @@ const layerPreErodeR = $('#layerPreErode'),
       layerBlurR = $('#layerBlur'), layerBlurN = $('#layerBlurNum'),
       layerErodeR = $('#layerErode'), layerErodeN = $('#layerErodeNum');
 const periodR = $('#period'), periodN = $('#periodNum');
+const cameraYawR = $('#cameraYaw'), cameraYawN = $('#cameraYawNum'),
+      cameraPitchR = $('#cameraPitch'), cameraPitchN = $('#cameraPitchNum'),
+      cameraZoomR = $('#cameraZoom'), cameraZoomN = $('#cameraZoomNum'),
+      cameraFovR = $('#cameraFov'), cameraFovN = $('#cameraFovNum'),
+      cameraDistanceR = $('#cameraDistance'),
+      cameraDistanceN = $('#cameraDistanceNum'),
+      layersOrthographic = $('#layersOrthographic');
+const dofSettings = $('#dofSettings'),
+      dofFocusR = $('#dofFocus'), dofFocusN = $('#dofFocusNum'),
+      dofBlurR = $('#dofBlur'), dofBlurN = $('#dofBlurNum'),
+      dofZoomCompR = $('#dofZoomComp'), dofZoomCompN = $('#dofZoomCompNum'),
+      dofRateR = $('#dofRate'), dofRateN = $('#dofRateNum'),
+      dofPowerR = $('#dofPower'), dofPowerN = $('#dofPowerNum'),
+      dofSigmaR = $('#dofSigma'), dofSigmaN = $('#dofSigmaNum'),
+      dofSigmaMinR = $('#dofSigmaMin'), dofSigmaMinN = $('#dofSigmaMinNum'),
+      dofDepthFalloffR = $('#dofDepthFalloff'),
+      dofDepthFalloffN = $('#dofDepthFalloffNum'),
+      dofMixStartR = $('#dofMixStart'), dofMixStartN = $('#dofMixStartNum'),
+      dofMixEndR = $('#dofMixEnd'), dofMixEndN = $('#dofMixEndNum');
 const autoBtn = $('#auto');
 const ANALYSIS_SIZE = 512;
 const ANALYSIS_SIGMA = 0.24;
@@ -45,7 +64,13 @@ let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, meshDepthMap = null, depthPreview = null, depthPreviewW = 0,
     depthPreviewH = 0, depthCoverage = null, cachedGpuFiltered = null;
-let yaw = -.22, pitch = -.16, zoom = 1, drag = false;
+let yaw = -.22, pitch = -.16, zoom = 1, cameraFov = 45,
+    cameraDistance = 3.2, drag = false;
+let activeCameraMode = 'surface';
+const cameraStates = {
+  surface: {yaw: -.22, pitch: -.16, zoom: 1, fov: 45, distance: 3.2},
+  layers: {yaw: -.22, pitch: -.16, zoom: 1, fov: 10, distance: 15}
+};
 let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
     lastGestureX = 0, lastGestureY = 0, lastGestureTime = 0,
     inertiaYaw = 0, inertiaPitch = 0;
@@ -563,6 +588,41 @@ function setPair(r, n, v) {
   r.value = String(x);
   n.value = formatValue(r, x);
 }
+function syncCameraUi() {
+  const values = [
+    [cameraYawR, cameraYawN, yaw * 180 / Math.PI],
+    [cameraPitchR, cameraPitchN, pitch * 180 / Math.PI],
+    [cameraZoomR, cameraZoomN, zoom],
+    [cameraFovR, cameraFovN, cameraFov],
+    [cameraDistanceR, cameraDistanceN, cameraDistance]
+  ];
+  for (const [range, number, value] of values) {
+    const formatted = formatValue(range, clampSliderValue(range, value));
+    if (number.value !== formatted) setPair(range, number, value);
+  }
+}
+function saveCameraState(mode) {
+  if (!cameraStates[mode]) return;
+  cameraStates[mode] = {
+    yaw, pitch, zoom, fov: cameraFov, distance: cameraDistance
+  };
+}
+function applyCameraMode(mode) {
+  if (mode === activeCameraMode || !cameraStates[mode]) return;
+  saveCameraState(activeCameraMode);
+  const state = cameraStates[mode];
+  yaw = state.yaw;
+  pitch = state.pitch;
+  zoom = state.zoom;
+  cameraFov = state.fov;
+  cameraDistance = state.distance;
+  inertiaYaw = 0;
+  inertiaPitch = 0;
+  autoBaseYaw = yaw;
+  autoBasePitch = pitch;
+  activeCameraMode = mode;
+  syncCameraUi();
+}
 function smoothstep(a, b, x) {
   const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a)));
   return t * t * (3 - 2 * t);
@@ -600,9 +660,18 @@ function resetCamera() {
   yaw = -.22;
   pitch = -.16;
   zoom = 1;
+  const layersMode = currentViewMode() === 'layers';
+  cameraFov = layersMode ? 10 : 45;
+  cameraDistance = layersMode ? 15 : 3.2;
+  setPair(cameraYawR, cameraYawN, yaw * 180 / Math.PI);
+  setPair(cameraPitchR, cameraPitchN, pitch * 180 / Math.PI);
+  setPair(cameraZoomR, cameraZoomN, zoom);
+  setPair(cameraFovR, cameraFovN, cameraFov);
+  setPair(cameraDistanceR, cameraDistanceN, cameraDistance);
   autoBaseYaw = yaw;
   autoBasePitch = pitch;
   autoTime = 0;
+  saveCameraState(layersMode ? 'layers' : 'surface');
   pauseAuto(700);
   sched();
 }
@@ -705,6 +774,8 @@ const GU = {
   depth: gl.getUniformLocation(gProg, 'uDepthScale'),
   sign: gl.getUniformLocation(gProg, 'uSign'),
   zoom: gl.getUniformLocation(gProg, 'uZoom'),
+  cameraDistance: gl.getUniformLocation(gProg, 'uCameraDistance'),
+  fov: gl.getUniformLocation(gProg, 'uFov'),
   aspect: gl.getUniformLocation(gProg, 'uAspect'),
   sourceTex: gl.getUniformLocation(gProg, 'uSourceTex'),
   depthTex: gl.getUniformLocation(gProg, 'uDepthTex'),
@@ -733,6 +804,9 @@ const LGU = {
   depth: gl.getUniformLocation(layerGProg, 'uDepthScale'),
   sign: gl.getUniformLocation(layerGProg, 'uSign'),
   zoom: gl.getUniformLocation(layerGProg, 'uZoom'),
+  cameraDistance: gl.getUniformLocation(layerGProg, 'uCameraDistance'),
+  fov: gl.getUniformLocation(layerGProg, 'uFov'),
+  orthographic: gl.getUniformLocation(layerGProg, 'uOrthographic'),
   aspect: gl.getUniformLocation(layerGProg, 'uAspect'),
   sourceCrop: gl.getUniformLocation(layerGProg, 'uSourceCrop'),
   sourceAspect: gl.getUniformLocation(layerGProg, 'uSourceAspect'),
@@ -777,7 +851,17 @@ const DU = {
   color: gl.getUniformLocation(dofProg, 'uColorTex'),
   position: gl.getUniformLocation(dofProg, 'uPositionTex'),
   texel: gl.getUniformLocation(dofProg, 'uTexel'),
+  direction: gl.getUniformLocation(dofProg, 'uDirection'),
   maxBlur: gl.getUniformLocation(dofProg, 'uMaxBlur'),
+  finalPass: gl.getUniformLocation(dofProg, 'uFinalPass'),
+  focusLayers: gl.getUniformLocation(dofProg, 'uFocusLayers'),
+  curveRate: gl.getUniformLocation(dofProg, 'uCurveRate'),
+  curvePower: gl.getUniformLocation(dofProg, 'uCurvePower'),
+  sigmaScale: gl.getUniformLocation(dofProg, 'uSigmaScale'),
+  sigmaMin: gl.getUniformLocation(dofProg, 'uSigmaMin'),
+  depthFalloff: gl.getUniformLocation(dofProg, 'uDepthFalloff'),
+  mixStart: gl.getUniformLocation(dofProg, 'uMixStart'),
+  mixEnd: gl.getUniformLocation(dofProg, 'uMixEnd'),
   layerDepths: gl.getUniformLocation(dofProg, 'uLayerDepths[0]')
 };
 
@@ -841,6 +925,7 @@ const gNormalTex = gl.createTexture();
 const gPositionTex = gl.createTexture();
 const gDepthRb = gl.createRenderbuffer();
 const litFbo = gl.createFramebuffer(), litTex = gl.createTexture();
+const dofTempFbo = gl.createFramebuffer(), dofTempTex = gl.createTexture();
 function initRenderTex(tex, internalFormat, format, type) {
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(
@@ -876,6 +961,14 @@ function initGBuffer() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, litFbo);
   gl.framebufferTexture2D(
       gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, litTex, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  initRenderTex(dofTempTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  gl.bindTexture(gl.TEXTURE_2D, dofTempTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dofTempFbo);
+  gl.framebufferTexture2D(
+      gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dofTempTex, 0);
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
@@ -1105,6 +1198,9 @@ function renderGBuffer() {
     gl.uniform1f(LGU.depth, effectiveDepthScale());
     gl.uniform1f(LGU.sign, currentShape());
     gl.uniform1f(LGU.zoom, zoom);
+    gl.uniform1f(LGU.cameraDistance, cameraDistance);
+    gl.uniform1f(LGU.fov, cameraFov);
+    gl.uniform1f(LGU.orthographic, layersOrthographic.checked ? 1 : 0);
     gl.uniform1f(LGU.aspect, cv.width / Math.max(1, cv.height));
     gl.uniform1f(LGU.sourceCrop, cropX / Math.max(1, mapW));
     gl.uniform1f(LGU.sourceAspect, mapH / Math.max(1, mapW - cropX));
@@ -1128,6 +1224,8 @@ function renderGBuffer() {
   gl.uniform1f(GU.depth, effectiveDepthScale());
   gl.uniform1f(GU.sign, currentShape());
   gl.uniform1f(GU.zoom, zoom);
+  gl.uniform1f(GU.cameraDistance, cameraDistance);
+  gl.uniform1f(GU.fov, cameraFov);
   gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
   gl.uniform1f(GU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
@@ -1209,6 +1307,8 @@ function updateLayerUi() {
   fragmentCleanupR.parentElement.classList.toggle('disabled', mode !== 'layers');
   document.querySelectorAll('.layer-morph').forEach(
       control => control.hidden = true);
+  dofSettings.hidden = mode !== 'layers';
+  if (mode !== 'layers') dofSettings.open = false;
   const depthMode = mode === 'depthmap';
   cv.style.display = depthMode ? 'none' : 'block';
   depthCv.style.display = depthMode ? 'block' : 'none';
@@ -2831,6 +2931,7 @@ downloadStlBtn.onclick = () => {
 };
 
 function render() {
+  syncCameraUi();
   if (currentViewMode() === 'depthmap') {
     renderDepthMap();
     return;
@@ -2847,7 +2948,13 @@ function render() {
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.useProgram(lightProg);
   gl.bindVertexArray(quadVao);
-  const lp = lightParams(), ld = lightDirCameraSpace();
+  const lp = layersMode ? {
+    ...lightParams(), ambient: 1.2, diffuse: 0, fill: 0.15,
+    shadowStrength: 0, selfShade: 0, specular: 0
+  } : lightParams();
+  // Layer cards are photographic cut-outs: use flat frontal illumination so
+  // rotating the construction cannot change their brightness.
+  const ld = layersMode ? {x: 0, y: 0, z: 1} : lightDirCameraSpace();
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, gAlbedoTex);
   gl.uniform1i(LU.albedo, 0);
@@ -2863,7 +2970,7 @@ function render() {
   gl.uniform2f(LU.shadowTexel, 1 / shadowSize, 1 / shadowSize);
   gl.uniformMatrix4fv(LU.lightVP, false, lightVP);
   gl.uniform3f(LU.lightDir, ld.x, ld.y, ld.z);
-  gl.uniform3f(LU.cameraPos, 0, 0, 3.2);
+  gl.uniform3f(LU.cameraPos, 0, 0, cameraDistance);
   gl.uniform1f(LU.ambient, lp.ambient);
   gl.uniform1f(LU.diffuse, lp.diffuse);
   gl.uniform1f(LU.fill, lp.fill);
@@ -2889,10 +2996,43 @@ function render() {
   gl.uniform2f(DU.texel, 1 / cv.width, 1 / cv.height);
   const cssPixelScale = cv.width /
       Math.max(1, stage.getBoundingClientRect().width);
-  gl.uniform1f(
-      DU.maxBlur, layersMode ? 5 * cssPixelScale : 0);
+  // Scale screen-space blur with the projected object size. This cancels the
+  // apparent increase in blur when the camera is zoomed out.
+  const projectionScale = layersOrthographic.checked ? zoom :
+      zoom * (3.2 / cameraDistance) *
+          (Math.tan(Math.PI / 8) / Math.tan(cameraFov * Math.PI / 360));
+  const layeredMaxBlur = layersMode ?
+      (+dofBlurR.value || 0) * cssPixelScale * Math.pow(
+          projectionScale, +dofZoomCompR.value || 0) : 0;
+  gl.uniform1f(DU.maxBlur, layeredMaxBlur);
+  gl.uniform1i(DU.focusLayers, Math.round(+dofFocusR.value || 1));
+  gl.uniform1f(DU.curveRate, +dofRateR.value || 0.1);
+  gl.uniform1f(DU.curvePower, +dofPowerR.value || 0.25);
+  gl.uniform1f(DU.sigmaScale, +dofSigmaR.value || 0.1);
+  gl.uniform1f(DU.sigmaMin, +dofSigmaMinR.value || 0.1);
+  gl.uniform1f(DU.depthFalloff, Math.max(0, +dofDepthFalloffR.value || 0));
+  gl.uniform1f(DU.mixStart, Math.max(0, +dofMixStartR.value || 0));
+  gl.uniform1f(DU.mixEnd, Math.max(0.001, +dofMixEndR.value || 0.001));
   gl.uniform1fv(DU.layerDepths, layerDofDepths);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  if (layersMode && layeredMaxBlur > 0) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dofTempFbo);
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.uniform1i(DU.finalPass, 0);
+    gl.uniform2f(DU.direction, 1, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, dofTempTex);
+    gl.uniform1i(DU.color, 0);
+    gl.uniform1i(DU.finalPass, 1);
+    gl.uniform2f(DU.direction, 0, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  } else {
+    gl.uniform1i(DU.finalPass, 1);
+    gl.uniform2f(DU.direction, 1, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
   gl.bindVertexArray(null);
   gl.enable(gl.DEPTH_TEST);
 }
@@ -2906,6 +3046,46 @@ syncPair(layerDilateR, layerDilateN);
 syncPair(layerBlurR, layerBlurN);
 syncPair(layerErodeR, layerErodeN);
 syncPair(periodR, periodN);
+[
+  [cameraYawR, cameraYawN], [cameraPitchR, cameraPitchN],
+  [cameraZoomR, cameraZoomN], [cameraFovR, cameraFovN],
+  [cameraDistanceR, cameraDistanceN]
+].forEach(([range, number]) => syncPair(range, number));
+cameraYawR.addEventListener('input', () => {
+  yaw = +cameraYawR.value * Math.PI / 180;
+  autoBaseYaw = yaw;
+  sched();
+});
+cameraPitchR.addEventListener('input', () => {
+  pitch = +cameraPitchR.value * Math.PI / 180;
+  autoBasePitch = pitch;
+  sched();
+});
+cameraZoomR.addEventListener('input', () => {
+  zoom = +cameraZoomR.value;
+  sched();
+});
+cameraFovR.addEventListener('input', () => {
+  cameraFov = +cameraFovR.value;
+  sched();
+});
+cameraDistanceR.addEventListener('input', () => {
+  cameraDistance = +cameraDistanceR.value;
+  sched();
+});
+layersOrthographic.addEventListener('change', sched);
+[
+  [dofFocusR, dofFocusN], [dofBlurR, dofBlurN],
+  [dofZoomCompR, dofZoomCompN],
+  [dofRateR, dofRateN], [dofPowerR, dofPowerN],
+  [dofSigmaR, dofSigmaN], [dofSigmaMinR, dofSigmaMinN],
+  [dofDepthFalloffR, dofDepthFalloffN],
+  [dofMixStartR, dofMixStartN], [dofMixEndR, dofMixEndN]
+].forEach(([range, number]) => {
+  syncPair(range, number);
+  range.addEventListener('input', sched);
+  number.addEventListener('input', sched);
+});
 setPair(depthR, depthN, 35);
 updateAutoButton();
 $('#reset').onclick = resetCamera;
@@ -2985,6 +3165,9 @@ document.querySelectorAll('input[name="shape"]')
     });
 document.querySelectorAll('input[name="viewmode"]')
     .forEach(el => el.onchange = () => {
+      // Swap the complete camera preset before rebuilding or scheduling a
+      // frame, preventing a transient frame with mixed mesh/layer parameters.
+      applyCameraMode(currentViewMode());
       updateLayerUi();
       reprocess();
       sched();
@@ -3042,7 +3225,7 @@ cv.addEventListener('pointermove', e => {
     }
     const distance = pointerDistance();
     if (pinchDistance > 0 && distance > 0)
-      zoom = Math.max(.35, Math.min(4, zoom * distance / pinchDistance));
+      zoom = Math.max(.1, Math.min(10, zoom * distance / pinchDistance));
     pinchDistance = distance;
     sched();
     return;
@@ -3087,7 +3270,7 @@ function finishPointer(e) {
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   pauseAuto();
-  zoom = Math.max(.35, Math.min(4, zoom * Math.exp(-e.deltaY * .001)));
+  zoom = Math.max(.1, Math.min(10, zoom * Math.exp(-e.deltaY * .001)));
   sched();
 }, {passive: false});
 cv.ondblclick = resetCamera;

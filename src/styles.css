@@ -202,6 +202,54 @@
       border-radius: 8px
     }
 
+    .settings {
+      position: relative;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .settings[hidden] {
+      display: none
+    }
+
+    .settings summary {
+      list-style: none;
+      padding: 11px 12px;
+      background: #20242d;
+      font-weight: 600;
+      cursor: pointer
+    }
+
+    .settings summary::-webkit-details-marker {
+      display: none
+    }
+
+    .settings[open] summary {
+      color: var(--accent)
+    }
+
+    .settings-panel {
+      display: grid;
+      gap: 9px;
+      padding: 12px;
+      background: var(--panel)
+    }
+
+    .settings-panel .range {
+      display: grid;
+      grid-template-columns: 72px minmax(70px, 1fr) 58px
+    }
+
+    .settings-panel input[type=range] {
+      width: 100%
+    }
+
+    .settings-panel .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text)
+    }
+
     #progressOverlay {
       position: absolute;
       left: 50%;
@@ -244,8 +292,27 @@
     }
 
     main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      min-height: 0;
+      overflow: hidden
+    }
+
+    #stage {
       position: relative;
+      min-width: 0;
       min-height: 0
+    }
+
+    #settingsSidebar {
+      min-width: 0;
+      overflow: auto;
+      border-left: 1px solid var(--line);
+      background: var(--panel)
+    }
+
+    #settingsSidebar[hidden] {
+      display: none
     }
 
     canvas {
@@ -253,6 +320,26 @@
       width: 100%;
       height: 100%;
       touch-action: none
+    }
+
+    @media (max-width: 720px) {
+      main {
+        grid-template-columns: minmax(0, 1fr)
+      }
+
+      .settings-panel {
+        padding: 8px
+      }
+
+      .settings-panel .range {
+        grid-template-columns: 62px minmax(54px, 1fr) 52px;
+        gap: 4px;
+        font-size: 12px
+      }
+
+      .settings-panel .num {
+        width: 52px
+      }
     }
 
     #depthView {

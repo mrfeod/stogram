@@ -66,22 +66,50 @@
       <a class="github-link" href="https://github.com/mrfeod/stogram" target="_blank" rel="noopener noreferrer">GitHub</a>
     </header>
     <main>
-      <canvas id="view"></canvas>
-      <canvas id="depthView"></canvas>
-      <button id="downloadDepth" hidden aria-label="Скачать карту глубины PNG">PNG</button>
-      <div id="meshDownloads">
-        <button id="downloadStl" aria-label="Скачать меш STL">STL</button>
-      </div>
-      <div id="progressOverlay" hidden>
-        <div id="progressText">0%</div>
-        <div class="progressTrack">
-          <div id="progressBar" class="progressFill"></div>
+      <section id="stage">
+        <canvas id="view"></canvas>
+        <canvas id="depthView"></canvas>
+        <button id="downloadDepth" hidden aria-label="Скачать карту глубины PNG">PNG</button>
+        <div id="meshDownloads">
+          <button id="downloadStl" aria-label="Скачать меш STL">STL</button>
         </div>
-      </div>
-      <div id="drop">
-        <div><strong>＋</strong></div>
-      </div>
-      <img id="thumb" hidden alt="Исходная стереограмма" role="button" tabindex="0" aria-label="Открыть стереограмму на весь экран" aria-expanded="false">
+        <div id="progressOverlay" hidden>
+          <div id="progressText">0%</div>
+          <div class="progressTrack">
+            <div id="progressBar" class="progressFill"></div>
+          </div>
+        </div>
+        <div id="drop"><div><strong>＋</strong></div></div>
+        <img id="thumb" hidden alt="Исходная стереограмма" role="button" tabindex="0" aria-label="Открыть стереограмму на весь экран" aria-expanded="false">
+      </section>
+      <aside id="settingsSidebar" hidden>
+        <details id="cameraSettings" class="settings" open>
+          <summary>Камера</summary>
+          <div class="settings-panel">
+            <label class="range">Yaw <input id="cameraYaw" type="range" min="-180" max="180" step="1" value="-13"><input id="cameraYawNum" class="num" type="number" min="-180" max="180" step="1" value="-13"></label>
+            <label class="range">Pitch <input id="cameraPitch" type="range" min="-80" max="80" step="1" value="-9"><input id="cameraPitchNum" class="num" type="number" min="-80" max="80" step="1" value="-9"></label>
+            <label class="range">Zoom <input id="cameraZoom" type="range" min="0.1" max="10" step="0.05" value="1"><input id="cameraZoomNum" class="num" type="number" min="0.1" max="10" step="0.05" value="1"></label>
+            <label class="range">FOV <input id="cameraFov" type="range" min="5" max="100" step="1" value="45"><input id="cameraFovNum" class="num" type="number" min="5" max="100" step="1" value="45"></label>
+            <label class="range">Distance <input id="cameraDistance" type="range" min="1.2" max="20" step="0.1" value="3.2"><input id="cameraDistanceNum" class="num" type="number" min="1.2" max="20" step="0.1" value="3.2"></label>
+            <label class="check"><input id="layersOrthographic" type="checkbox"> Ортографическая камера для слоёв</label>
+          </div>
+        </details>
+        <details id="dofSettings" class="settings" hidden open>
+          <summary>DoF</summary>
+          <div class="settings-panel">
+            <label class="range">Фокус <input id="dofFocus" type="range" min="1" max="8" step="1" value="2"><input id="dofFocusNum" class="num" type="number" min="1" max="8" step="1" value="2"></label>
+            <label class="range">Радиус <input id="dofBlur" type="range" min="0" max="16" step="0.1" value="2.5"><input id="dofBlurNum" class="num" type="number" min="0" max="16" step="0.1" value="2.5"></label>
+            <label class="range">Zoom comp <input id="dofZoomComp" type="range" min="0" max="2" step="0.05" value="0.7"><input id="dofZoomCompNum" class="num" type="number" min="0" max="2" step="0.05" value="0.7"></label>
+            <label class="range">Кривая <input id="dofRate" type="range" min="0.1" max="20" step="0.1" value="4"><input id="dofRateNum" class="num" type="number" min="0.1" max="20" step="0.1" value="4"></label>
+            <label class="range">Степень <input id="dofPower" type="range" min="0.25" max="4" step="0.05" value="2"><input id="dofPowerNum" class="num" type="number" min="0.25" max="4" step="0.05" value="2"></label>
+            <label class="range">Sigma <input id="dofSigma" type="range" min="0.1" max="2" step="0.05" value="0.75"><input id="dofSigmaNum" class="num" type="number" min="0.1" max="2" step="0.05" value="0.75"></label>
+            <label class="range">Sigma min <input id="dofSigmaMin" type="range" min="0.1" max="2" step="0.05" value="0.75"><input id="dofSigmaMinNum" class="num" type="number" min="0.1" max="2" step="0.05" value="0.75"></label>
+            <label class="range">Граница <input id="dofDepthFalloff" type="range" min="0" max="200" step="1" value="55"><input id="dofDepthFalloffNum" class="num" type="number" min="0" max="200" step="1" value="55"></label>
+            <label class="range">Mix start <input id="dofMixStart" type="range" min="0" max="2" step="0.05" value="0.15"><input id="dofMixStartNum" class="num" type="number" min="0" max="2" step="0.05" value="0.15"></label>
+            <label class="range">Mix full <input id="dofMixEnd" type="range" min="0.1" max="4" step="0.05" value="0.1"><input id="dofMixEndNum" class="num" type="number" min="0.1" max="4" step="0.05" value="0.1"></label>
+          </div>
+        </details>
+      </aside>
     </main>
   </div>
   <script type="module" src="src/app.js"></script>
