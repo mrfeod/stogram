@@ -105,6 +105,11 @@ const sceneCache = {
   surface: null,
   layers: null
 };
+function invalidateSceneCaches() {
+  sceneGeneration++;
+  layerExportData = null;
+  downloadLayersPngBtn.disabled = true;
+}
 const meshDepthBlurCache = new WeakMap();
 let layerHistogramSource = null, layerHistogramPeaks = [],
     autoLayerCount = true;
@@ -1622,6 +1627,7 @@ function activateDepthImage(image, url, revokeUrl = false) {
   processedDepth = rawDepth.slice();
   cropX = 0;
   bgDepth = 0;
+  invalidateSceneCaches();
   if (revokeUrl)
     thumb.onload = () => {
       URL.revokeObjectURL(url);
@@ -1808,8 +1814,8 @@ function reprocess(onDone = null) {
     if (!loadedDepthMap && !gpuFiltered)
       processedDepth = gaussianBlur(rawDepth, mapW, mapH, ANALYSIS_SIGMA);
     cachedGpuFiltered = gpuFiltered;
+    invalidateSceneCaches();
     rebuildDepthPreview(gpuFiltered);
-    sceneGeneration++;
     buildMesh();
     sched();
     if (onDone) onDone();
