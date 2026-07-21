@@ -349,12 +349,36 @@ uniform sampler2D uAlbedoTex;
 uniform sampler2D uNormalTex;
 uniform sampler2D uPositionTex;
 uniform sampler2D uShadowTex;
+uniform sampler2D uSkyTex;
 uniform vec2 uShadowTexel;
 uniform mat4 uLightVP;
 uniform vec3 uLightDir;
 uniform vec3 uCameraPos;
 uniform float uAmbient,uDiffuse,uFill,uShadowStrength,uSelfShade,uSpecular,uShininess,uBiasBase,uBiasSlope,uPcfRadius,uShadowHardness;
+uniform float uSkyEnabled,uSkyYaw,uSkyPitch,uSkyAspect,uSkyFov;
+uniform float uSkyBlur,uSkyBrightness,uSkySaturation,uSkyVignette;
+uniform float uSkyYawParallax,uSkyPitchParallax;
 out vec4 outColor;
+vec3 skyColor(){
+  // Project the view ray onto an infinite cylinder. Longitude wraps, while
+  // latitude is clamped to avoid a seam at the poles of a flat source image.
+  vec2 ndc=vUV*2.0-1.0;
+  float tanHalfFov=tan(radians(uSkyFov)*0.5);
+  vec3 ray=normalize(vec3(
+      ndc.x*uSkyAspect*tanHalfFov,ndc.y*tanHalfFov,-1.0));
+  float cy=cos(uSkyYaw*uSkyYawParallax),sy=sin(uSkyYaw*uSkyYawParallax);
+  float cp=cos(uSkyPitch*uSkyPitchParallax),sp=sin(uSkyPitch*uSkyPitchParallax);
+  ray=vec3(ray.x*cy-ray.z*sy,ray.y,ray.x*sy+ray.z*cy);
+  ray=vec3(ray.x,ray.y*cp+ray.z*sp,-ray.y*sp+ray.z*cp);
+  vec2 uv=vec2(
+      fract(atan(ray.x,-ray.z)/6.2831853+0.5),
+      clamp(0.5+asin(clamp(ray.y,-1.0,1.0))/3.14159265,0.02,0.98));
+  vec3 color=textureLod(uSkyTex,uv,uSkyBlur).rgb;
+  float luma=dot(color,vec3(0.2126,0.7152,0.0722));
+  color=mix(vec3(luma),color,uSkySaturation)*uSkyBrightness;
+  float vignette=1.0-uSkyVignette*smoothstep(0.25,1.25,dot(ndc,ndc));
+  return color*vignette;
+}
 float shadowFactor(vec3 worldPos, vec3 N, vec3 L){
   vec4 sp=uLightVP*vec4(worldPos,1.0);
   vec3 proj=sp.xyz/max(sp.w, 1e-6);
@@ -378,7 +402,11 @@ void main(){
   vec4 a=texture(uAlbedoTex,vUV);
   vec4 nTex=texture(uNormalTex,vUV);
   vec4 pTex=texture(uPositionTex,vUV);
-  if(a.a<0.5 || pTex.a<0.5){ outColor=vec4(0.045,0.05,0.06,1.0); return; }
+  if(a.a<0.5 || pTex.a<0.5){
+    vec3 background=uSkyEnabled>0.5?skyColor():vec3(0.045,0.05,0.06);
+    outColor=vec4(background,1.0);
+    return;
+  }
   vec3 albedo=a.rgb;
   vec3 N=normalize(nTex.xyz*2.0-1.0);
   vec3 worldPos=pTex.xyz;

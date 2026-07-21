@@ -41,6 +41,12 @@ const dofSettings = $('#dofSettings'),
       dofMixStartR = $('#dofMixStart'), dofMixStartN = $('#dofMixStartNum'),
       dofMixEndR = $('#dofMixEnd'), dofMixEndN = $('#dofMixEndNum');
 const autoBtn = $('#auto');
+const skyBlurR = $('#skyBlur'), skyBlurN = $('#skyBlurNum'),
+      skyBrightnessR = $('#skyBrightness'), skyBrightnessN = $('#skyBrightnessNum'),
+      skySaturationR = $('#skySaturation'), skySaturationN = $('#skySaturationNum'),
+      skyVignetteR = $('#skyVignette'), skyVignetteN = $('#skyVignetteNum'),
+      skyYawParallaxR = $('#skyYawParallax'), skyYawParallaxN = $('#skyYawParallaxNum'),
+      skyPitchParallaxR = $('#skyPitchParallax'), skyPitchParallaxN = $('#skyPitchParallaxNum');
 const ANALYSIS_SIZE = 512;
 const ANALYSIS_SIGMA = 0.24;
 const MESH_STEP_PX = 2;
@@ -834,6 +840,7 @@ const LU = {
   normal: gl.getUniformLocation(lightProg, 'uNormalTex'),
   position: gl.getUniformLocation(lightProg, 'uPositionTex'),
   shadowTex: gl.getUniformLocation(lightProg, 'uShadowTex'),
+  skyTex: gl.getUniformLocation(lightProg, 'uSkyTex'),
   shadowTexel: gl.getUniformLocation(lightProg, 'uShadowTexel'),
   lightVP: gl.getUniformLocation(lightProg, 'uLightVP'),
   lightDir: gl.getUniformLocation(lightProg, 'uLightDir'),
@@ -848,7 +855,18 @@ const LU = {
   biasBase: gl.getUniformLocation(lightProg, 'uBiasBase'),
   biasSlope: gl.getUniformLocation(lightProg, 'uBiasSlope'),
   pcfRadius: gl.getUniformLocation(lightProg, 'uPcfRadius'),
-  shadowHardness: gl.getUniformLocation(lightProg, 'uShadowHardness')
+  shadowHardness: gl.getUniformLocation(lightProg, 'uShadowHardness'),
+  skyEnabled: gl.getUniformLocation(lightProg, 'uSkyEnabled'),
+  skyYaw: gl.getUniformLocation(lightProg, 'uSkyYaw'),
+  skyPitch: gl.getUniformLocation(lightProg, 'uSkyPitch'),
+  skyAspect: gl.getUniformLocation(lightProg, 'uSkyAspect'),
+  skyFov: gl.getUniformLocation(lightProg, 'uSkyFov'),
+  skyBlur: gl.getUniformLocation(lightProg, 'uSkyBlur'),
+  skyBrightness: gl.getUniformLocation(lightProg, 'uSkyBrightness'),
+  skySaturation: gl.getUniformLocation(lightProg, 'uSkySaturation'),
+  skyVignette: gl.getUniformLocation(lightProg, 'uSkyVignette'),
+  skyYawParallax: gl.getUniformLocation(lightProg, 'uSkyYawParallax'),
+  skyPitchParallax: gl.getUniformLocation(lightProg, 'uSkyPitchParallax')
 };
 const DU = {
   color: gl.getUniformLocation(dofProg, 'uColorTex'),
@@ -2981,6 +2999,20 @@ function render() {
   gl.activeTexture(gl.TEXTURE3);
   gl.bindTexture(gl.TEXTURE_2D, shadowTex);
   gl.uniform1i(LU.shadowTex, 3);
+  gl.activeTexture(gl.TEXTURE7);
+  gl.bindTexture(gl.TEXTURE_2D, sourceTex);
+  gl.uniform1i(LU.skyTex, 7);
+  gl.uniform1f(LU.skyEnabled, textureLoaded ? 1 : 0);
+  gl.uniform1f(LU.skyYaw, yaw);
+  gl.uniform1f(LU.skyPitch, pitch);
+  gl.uniform1f(LU.skyAspect, cv.width / Math.max(1, cv.height));
+  gl.uniform1f(LU.skyFov, cameraFov);
+  gl.uniform1f(LU.skyBlur, +skyBlurR.value);
+  gl.uniform1f(LU.skyBrightness, +skyBrightnessR.value);
+  gl.uniform1f(LU.skySaturation, +skySaturationR.value);
+  gl.uniform1f(LU.skyVignette, +skyVignetteR.value);
+  gl.uniform1f(LU.skyYawParallax, +skyYawParallaxR.value);
+  gl.uniform1f(LU.skyPitchParallax, +skyPitchParallaxR.value);
   gl.uniform2f(LU.shadowTexel, 1 / shadowSize, 1 / shadowSize);
   gl.uniformMatrix4fv(LU.lightVP, false, lightVP);
   gl.uniform3f(LU.lightDir, ld.x, ld.y, ld.z);
@@ -3098,6 +3130,16 @@ layersOrthographic.addEventListener('change', sched);
   [dofSigmaR, dofSigmaN], [dofSigmaMinR, dofSigmaMinN],
   [dofDepthFalloffR, dofDepthFalloffN],
   [dofMixStartR, dofMixStartN], [dofMixEndR, dofMixEndN]
+].forEach(([range, number]) => {
+  syncPair(range, number);
+  range.addEventListener('input', sched);
+  number.addEventListener('input', sched);
+});
+[
+  [skyBlurR, skyBlurN], [skyBrightnessR, skyBrightnessN],
+  [skySaturationR, skySaturationN], [skyVignetteR, skyVignetteN],
+  [skyYawParallaxR, skyYawParallaxN],
+  [skyPitchParallaxR, skyPitchParallaxN]
 ].forEach(([range, number]) => {
   syncPair(range, number);
   range.addEventListener('input', sched);

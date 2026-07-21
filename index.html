@@ -73,6 +73,18 @@
         <div id="meshDownloads">
           <button id="downloadStl" aria-label="Скачать меш STL">STL</button>
         </div>
+        <details id="skySettings" class="floating-settings" hidden open>
+          <summary>Фон</summary>
+          <div class="floating-settings-panel" hidden>
+            <label class="range">Blur <input id="skyBlur" type="range" min="0" max="8" step="0.1" value="8"><input id="skyBlurNum"
+                class="num" type="number" min="0" max="8" step="0.1" value="5"></label>
+            <label class="range">Яркость <input id="skyBrightness" type="range" min="0" max="1" step="0.01" value="0.9"><input id="skyBrightnessNum" class="num" type="number" min="0" max="1" step="0.01" value="0.9"></label>
+            <label class="range">Насыщенность <input id="skySaturation" type="range" min="0" max="1.5" step="0.01" value="0.9"><input id="skySaturationNum" class="num" type="number" min="0" max="1.5" step="0.01" value="0.9"></label>
+            <label class="range">Виньетка <input id="skyVignette" type="range" min="0" max="0.8" step="0.01" value="0.25"><input id="skyVignetteNum" class="num" type="number" min="0" max="0.8" step="0.01" value="0.25"></label>
+            <label class="range">Yaw parallax <input id="skyYawParallax" type="range" min="0" max="1" step="0.01" value="0.28"><input id="skyYawParallaxNum" class="num" type="number" min="0" max="1" step="0.01" value="0.28"></label>
+            <label class="range">Pitch parallax <input id="skyPitchParallax" type="range" min="0" max="1" step="0.01" value="0.22"><input id="skyPitchParallaxNum" class="num" type="number" min="0" max="1" step="0.01" value="0.22"></label>
+          </div>
+        </details>
         <div id="progressOverlay" hidden>
           <div id="progressText">0%</div>
           <div class="progressTrack">

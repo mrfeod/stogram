@@ -315,6 +315,30 @@
       display: none
     }
 
+    .floating-settings {
+      position: absolute;
+      right: 16px;
+      top: 16px;
+      z-index: 5;
+      width: min(390px, calc(100% - 32px));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: color-mix(in srgb, var(--panel) 90%, transparent);
+      backdrop-filter: blur(10px)
+    }
+
+    .floating-settings[hidden] { display: none }
+    .floating-settings summary { padding: 10px 12px; cursor: pointer }
+    .floating-settings-panel { display: grid; gap: 8px; padding: 4px 12px 12px }
+    .floating-settings-panel .range {
+      display: grid;
+      grid-template-columns: 112px minmax(80px, 1fr) 62px;
+      align-items: center;
+      gap: 8px
+    }
+    .floating-settings-panel .num { width: 62px }
+
     canvas {
       display: block;
       width: 100%;
