@@ -69,7 +69,10 @@ let yaw = -.22, pitch = -.16, zoom = 1, cameraFov = 45,
 let activeCameraMode = 'surface';
 const cameraStates = {
   surface: {yaw: -.22, pitch: -.16, zoom: 1, fov: 45, distance: 3.2},
-  layers: {yaw: -.22, pitch: -.16, zoom: 1, fov: 10, distance: 15}
+  layers: {
+    yaw: -5 * Math.PI / 180, pitch: 5 * Math.PI / 180,
+    zoom: 1, fov: 10, distance: 15
+  }
 };
 let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
     lastGestureX = 0, lastGestureY = 0, lastGestureTime = 0,
@@ -657,10 +660,10 @@ function pauseAuto(ms = 1800) {
 function resetCamera() {
   inertiaYaw = 0;
   inertiaPitch = 0;
-  yaw = -.22;
-  pitch = -.16;
-  zoom = 1;
   const layersMode = currentViewMode() === 'layers';
+  yaw = layersMode ? -5 * Math.PI / 180 : -.22;
+  pitch = layersMode ? 5 * Math.PI / 180 : -.16;
+  zoom = 1;
   cameraFov = layersMode ? 10 : 45;
   cameraDistance = layersMode ? 15 : 3.2;
   setPair(cameraYawR, cameraYawN, yaw * 180 / Math.PI);
@@ -1279,8 +1282,18 @@ function frame(now) {
   }
   if (processedDepth && autoRotate && !drag && now > autoPauseUntil) {
     autoTime += dt * 0.001;
-    yaw = autoBaseYaw + Math.sin(autoTime * 0.72) * 0.55;
-    pitch = autoBasePitch + Math.sin(autoTime * 0.41) * 0.14;
+    if (currentViewMode() === 'layers') {
+      yaw = autoBaseYaw +
+          Math.sin(autoTime * 0.72) * 10 * Math.PI / 180;
+      pitch = autoBasePitch +
+          Math.sin(autoTime * 0.41) * 5 * Math.PI / 180;
+    } else {
+      yaw = autoBaseYaw + Math.sin(autoTime * 0.72) * 0.55;
+      const pitchWave = Math.sin(autoTime * 0.41),
+            positivePitch = 0.14 + 7.5 * Math.PI / 180;
+      pitch = autoBasePitch + pitchWave *
+          (pitchWave >= 0 ? positivePitch : 0.14);
+    }
     dirty = true;
   }
   if (processedDepth && surfaceUsesDepthTexture &&
