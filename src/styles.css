@@ -415,7 +415,8 @@
       display: none
     }
 
-    #meshDownloads {
+    #meshDownloads,
+    #layerDownloads {
       position: absolute;
       top: 12px;
       right: 12px;
@@ -424,7 +425,13 @@
       gap: 6px
     }
 
-    #meshDownloads button {
+    #meshDownloads[hidden],
+    #layerDownloads[hidden] {
+      display: none
+    }
+
+    #meshDownloads button,
+    #layerDownloads button {
       height: 42px;
       min-width: 42px;
       padding: 0 9px;

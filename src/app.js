@@ -11,7 +11,9 @@ const cv = $('#view'), depthCv = $('#depthView'),
       progressOverlay = $('#progressOverlay'),
       progressText = $('#progressText'), progressBar = $('#progressBar');
 const downloadDepthBtn = $('#downloadDepth'),
-      meshDownloads = $('#meshDownloads'), downloadStlBtn = $('#downloadStl');
+      meshDownloads = $('#meshDownloads'), downloadStlBtn = $('#downloadStl'),
+      layerDownloads = $('#layerDownloads'),
+      downloadLayersPngBtn = $('#downloadLayersPng');
 const depthR = $('#depth'), depthN = $('#depthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
 const fragmentCleanupR = $('#fragmentCleanup'),
@@ -65,7 +67,8 @@ if (!gl) {
   throw new Error('WebGL2 unavailable');
 }
 
-let img = null, loadedDepthMap = false, textureLoaded = false;
+let img = null, textureImage = null, loadedDepthMap = false,
+    textureLoaded = false;
 let meshDepthValue = 35;
 let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
@@ -95,7 +98,7 @@ let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0, layerMorphTimer = 0;
 let layerInstanceCount = 0, layerLevels = new Float32Array(16),
-    layerDofDepths = new Float32Array(16);
+    layerDofDepths = new Float32Array(16), layerExportData = null;
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 let sceneGeneration = 0;
 const sceneCache = {
@@ -1364,6 +1367,8 @@ function updateLayerUi() {
   downloadDepthBtn.disabled = !depthPreview;
   meshDownloads.hidden = mode !== 'surface';
   downloadStlBtn.disabled = !processedDepth;
+  layerDownloads.hidden = mode !== 'layers';
+  downloadLayersPngBtn.disabled = !processedDepth;
   depthR.parentElement.classList.toggle('disabled', mode !== 'surface');
 }
 updateLayerUi();
@@ -1496,6 +1501,7 @@ function updateSourceModeUi() {
   periodR.parentElement.classList.toggle('disabled', loadedDepthMap);
 }
 function uploadTextureImage(image) {
+  textureImage = image;
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
@@ -2094,6 +2100,8 @@ function activateCachedScene(mode) {
     layerInstanceCount = cached.instanceCount;
     layerLevels.set(cached.levels);
     layerDofDepths.set(cached.dofDepths);
+    layerExportData = cached.exportData || null;
+    downloadLayersPngBtn.disabled = !layerExportData;
     surfaceUsesDepthTexture = false;
   } else {
     layerInstanceCount = 0;
@@ -2298,8 +2306,17 @@ function buildMesh() {
       instanceCount: layerInstanceCount,
       levels: layerLevels.slice(),
       dofDepths: layerDofDepths.slice(),
+      exportData: {
+        width: nx,
+        height: ny,
+        count: renderLayerCount,
+        masks: maskData,
+        depths: Float32Array.from(signedLevels)
+      },
       bounds: {...meshSourceBounds}
     };
+    layerExportData = sceneCache.layers.exportData;
+    downloadLayersPngBtn.disabled = false;
     return;
 
   }
@@ -3039,6 +3056,81 @@ downloadStlBtn.onclick = () => {
   downloadBlob(
       new Blob([trianglesToBinaryStl(triangles)], {type: 'model/stl'}),
       'stogram-mesh.stl');
+};
+
+downloadLayersPngBtn.onclick = async () => {
+  if (currentViewMode() !== 'layers' || !processedDepth ||
+      !layerExportData || !textureImage) return;
+  downloadLayersPngBtn.disabled = true;
+  const sourceWidth = textureImage.naturalWidth || textureImage.width,
+        sourceHeight = textureImage.naturalHeight || textureImage.height,
+        sourceCropX = Math.round(sourceWidth * cropX / Math.max(1, mapW)),
+        width = Math.max(1, sourceWidth - sourceCropX),
+        height = Math.max(1, sourceHeight),
+        {width: maskWidth, height: maskHeight, count, masks, depths} =
+            layerExportData;
+  const output = document.createElement('canvas');
+  output.width = width;
+  output.height = height;
+  const outputContext = output.getContext('2d'),
+        maskCanvas = document.createElement('canvas'),
+        cardCanvas = document.createElement('canvas');
+  maskCanvas.width = maskWidth;
+  maskCanvas.height = maskHeight;
+  cardCanvas.width = width;
+  cardCanvas.height = height;
+  const maskContext = maskCanvas.getContext('2d'),
+        cardContext = cardCanvas.getContext('2d'),
+        maskImage = maskContext.createImageData(maskWidth, maskHeight),
+        maskPixels = maskWidth * maskHeight,
+        focusCount = Math.max(1, Math.round(+dofFocusR.value || 1)),
+        focusIndex = Math.min(count - 1, focusCount - 1),
+        referenceHeight = Math.max(
+            1, stage.getBoundingClientRect().height *
+                Math.min(devicePixelRatio || 1, 2)),
+        exportScale = height / referenceHeight,
+        maxBlur = Math.max(0, +dofBlurR.value || 0) * exportScale,
+        rate = Math.max(.0001, +dofRateR.value || .1),
+        power = Math.max(.01, +dofPowerR.value || .25);
+  // GPU instances are stored from front to back. Composite in reverse so the
+  // nearest card is the last one painted over the complete rear card.
+  for (let layer = count - 1; layer >= 0; layer--) {
+    const maskOffset = layer * maskPixels;
+    for (let i = 0, p = 0; i < maskPixels; i++, p += 4) {
+      const alpha = masks[maskOffset + i];
+      maskImage.data[p] = 255;
+      maskImage.data[p + 1] = 255;
+      maskImage.data[p + 2] = 255;
+      maskImage.data[p + 3] = alpha;
+    }
+    maskContext.putImageData(maskImage, 0, 0);
+    cardContext.clearRect(0, 0, width, height);
+    cardContext.globalCompositeOperation = 'source-over';
+    cardContext.drawImage(
+        textureImage, sourceCropX, 0, width, sourceHeight,
+        0, 0, width, height);
+    cardContext.globalCompositeOperation = 'destination-in';
+    cardContext.imageSmoothingEnabled = true;
+    cardContext.imageSmoothingQuality = 'high';
+    cardContext.drawImage(maskCanvas, 0, 0, width, height);
+    cardContext.globalCompositeOperation = 'source-over';
+    const delta = layer < focusCount ? 0 :
+        Math.max(0, depths[focusIndex] - depths[layer]),
+          curve = 1 - Math.exp(-delta * rate),
+          blur = layer < focusCount ? 0 :
+              maxBlur * Math.pow(Math.max(0, curve), power);
+    outputContext.filter = blur > .05 ? `blur(${blur.toFixed(2)}px)` : 'none';
+    outputContext.drawImage(cardCanvas, 0, 0);
+    // Let the browser present between large layer composites instead of
+    // freezing the interface for the whole export.
+    if ((count - layer) % 3 === 0)
+      await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+  outputContext.filter = 'none';
+  output.toBlob(blob => {
+    if (blob) downloadBlob(blob, 'stogram-layers.png');
+    downloadLayersPngBtn.disabled = false;
+  }, 'image/png');
 };
 
 function render() {
