@@ -477,16 +477,6 @@ void main(){
     return;
   }
   float radius=radiusAt(centerPosition);
-  // Outside a card there is no center depth from which to derive a radius.
-  // Gather the largest nearby circle of confusion so a blurred silhouette can
-  // extend into empty space instead of being clipped by the original mask.
-  if(!centerGeometry){
-    for(int i=-5;i<=5;i++){
-      vec2 probeUV=clamp(vUV+uDirection*uTexel*uMaxBlur*float(i)/5.0,
-          vec2(0.0),vec2(1.0));
-      radius=max(radius,radiusAt(texture(uPositionTex,probeUV)));
-    }
-  }
   if(radius<uMixStart){
     if(uFinalPass==0)
       outColor=vec4(centerSample.rgb*centerCoverage,centerCoverage);
@@ -500,6 +490,9 @@ void main(){
   vec3 sum=vec3(0.0);
   float alphaSum=0.0;
   float kernelWeightSum=0.0;
+  vec3 paddingColorSum=vec3(0.0);
+  float paddingColorWeight=0.0;
+  float emptyWeight=0.0;
   // A sparse 3x3 kernel leaves large unsampled gaps on high-frequency
   // stereogram textures, which shows up as tiled ghost copies instead of blur.
   // Blur along each axis with dense Gaussian taps so the footprint stays smooth
@@ -530,7 +523,23 @@ void main(){
         colorSample.rgb*coverage:colorSample.rgb*accepted;
     sum+=premultiplied*weight;
     alphaSum+=coverage*weight;
-    kernelWeightSum+=weight;
+    if(samplePosition.a>=0.5){
+      paddingColorSum+=colorSample.rgb*weight;
+      paddingColorWeight+=weight;
+    }else emptyWeight+=weight;
+    // Occluding foreground samples contribute neither color nor kernel mass.
+    // Keeping them in the denominator punches a translucent bright/dark rim
+    // into the blurred layer behind.
+    kernelWeightSum+=weight*accepted;
+  }
+  // Dilate layer colour into empty kernel taps before applying the Gaussian.
+  // This is the same padding used around sprites in a texture atlas: blur sees
+  // plausible texture behind every silhouette instead of transparent/clear
+  // pixels, so it cannot draw a sharp bright or dark contour.
+  if(emptyWeight>0.0&&paddingColorWeight>1e-5){
+    vec3 paddingColor=paddingColorSum/paddingColorWeight;
+    sum+=paddingColor*emptyWeight;
+    alphaSum+=emptyWeight;
   }
   vec3 blurred=sum/max(kernelWeightSum,1e-5);
   float blurredCoverage=alphaSum/max(kernelWeightSum,1e-5);
@@ -541,13 +550,8 @@ void main(){
   float coverage=mix(centerCoverage,blurredCoverage,amount);
   if(uFinalPass==0)
     outColor=vec4(premultiplied,coverage);
-  else{
-    // Reconstruct the edge color before compositing. Using premultiplied RGB
-    // directly makes dark fringes; adding the original foreground underneath
-    // makes the same edge look emissive. A slightly tightened coverage ramp
-    // keeps the contour soft without either halo.
-    vec3 edgeColor=coverage>1e-4?premultiplied/coverage:backdrop;
-    float edgeCoverage=smoothstep(0.12,0.88,coverage);
-    outColor=vec4(mix(backdrop,edgeColor,edgeCoverage),1.0);
-  }
+  else
+    // RGB is already premultiplied by coverage. Dividing it by alpha at a
+    // silhouette amplifies bright texels and creates a glowing outline.
+    outColor=vec4(premultiplied+backdrop*(1.0-coverage),1.0);
 }`;
