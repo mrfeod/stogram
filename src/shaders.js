@@ -408,6 +408,7 @@ precision highp float;
 in vec2 vUV;
 uniform sampler2D uColorTex;
 uniform sampler2D uPositionTex;
+uniform sampler2D uBackdropTex;
 uniform vec2 uTexel;
 uniform vec2 uDirection;
 uniform float uMaxBlur;
@@ -435,13 +436,14 @@ float radiusAt(vec4 position){
 void main(){
   vec4 centerPosition=texture(uPositionTex,vUV);
   vec4 centerSample=texture(uColorTex,vUV);
+  vec3 backdrop=texture(uBackdropTex,vUV).rgb;
   bool centerGeometry=centerPosition.a>=0.5;
   int layerIndex=centerGeometry?
       clamp(int(centerPosition.a-1.0+0.5),0,15):0;
   float centerCoverage=uFinalPass==0?(centerGeometry?1.0:0.0):centerSample.a;
   if(centerGeometry&&centerPosition.a<=float(uFocusLayers)){
     outColor=uFinalPass==0?vec4(centerSample.rgb,1.0):
-        vec4(centerSample.rgb+vec3(0.045,0.05,0.06)*(1.0-centerSample.a),1.0);
+        vec4(centerSample.rgb+backdrop*(1.0-centerSample.a),1.0);
     return;
   }
   float radius=radiusAt(centerPosition);
@@ -459,8 +461,7 @@ void main(){
     if(uFinalPass==0)
       outColor=vec4(centerSample.rgb*centerCoverage,centerCoverage);
     else
-      outColor=vec4(centerSample.rgb+
-          vec3(0.045,0.05,0.06)*(1.0-centerSample.a),1.0);
+      outColor=vec4(centerSample.rgb+backdrop*(1.0-centerSample.a),1.0);
     return;
   }
   vec2 axis=uDirection*uTexel*max(radius/5.0,1.0);
@@ -481,18 +482,22 @@ void main(){
     vec4 samplePosition=texture(uPositionTex,sampleUV);
     vec4 colorSample=texture(uColorTex,sampleUV);
     float coverage=uFinalPass==0?(samplePosition.a>=0.5?1.0:0.0):colorSample.a;
+    float accepted=1.0;
     float depthWeight=1.0;
     if(centerGeometry&&samplePosition.a>=0.5){
       int sampleLayer=clamp(int(samplePosition.a-1.0+0.5),0,15);
       float sampleDepth=uLayerDepths[sampleLayer];
       float inFront=max(0.0,sampleDepth-centerDepth);
-      if(inFront>1e-4) coverage=0.0;
+      if(inFront>1e-4){
+        coverage=0.0;
+        accepted=0.0;
+      }
       float behind=max(0.0,centerDepth-sampleDepth);
       depthWeight=exp(-behind*uDepthFalloff);
     }
     float weight=spatialWeight*depthWeight;
     vec3 premultiplied=uFinalPass==0?
-        colorSample.rgb*coverage:colorSample.rgb;
+        colorSample.rgb*coverage:colorSample.rgb*accepted;
     sum+=premultiplied*weight;
     alphaSum+=coverage*weight;
     kernelWeightSum+=weight;
@@ -506,7 +511,13 @@ void main(){
   float coverage=mix(centerCoverage,blurredCoverage,amount);
   if(uFinalPass==0)
     outColor=vec4(premultiplied,coverage);
-  else
-    outColor=vec4(premultiplied+
-        vec3(0.045,0.05,0.06)*(1.0-coverage),1.0);
+  else{
+    // Reconstruct the edge color before compositing. Using premultiplied RGB
+    // directly makes dark fringes; adding the original foreground underneath
+    // makes the same edge look emissive. A slightly tightened coverage ramp
+    // keeps the contour soft without either halo.
+    vec3 edgeColor=coverage>1e-4?premultiplied/coverage:backdrop;
+    float edgeCoverage=smoothstep(0.12,0.88,coverage);
+    outColor=vec4(mix(backdrop,edgeColor,edgeCoverage),1.0);
+  }
 }`;

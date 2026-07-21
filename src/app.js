@@ -853,6 +853,7 @@ const LU = {
 const DU = {
   color: gl.getUniformLocation(dofProg, 'uColorTex'),
   position: gl.getUniformLocation(dofProg, 'uPositionTex'),
+  backdrop: gl.getUniformLocation(dofProg, 'uBackdropTex'),
   texel: gl.getUniformLocation(dofProg, 'uTexel'),
   direction: gl.getUniformLocation(dofProg, 'uDirection'),
   maxBlur: gl.getUniformLocation(dofProg, 'uMaxBlur'),
@@ -3006,6 +3007,9 @@ function render() {
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, gPositionTex);
   gl.uniform1i(DU.position, 1);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, litTex);
+  gl.uniform1i(DU.backdrop, 2);
   gl.uniform2f(DU.texel, 1 / cv.width, 1 / cv.height);
   const cssPixelScale = cv.width /
       Math.max(1, stage.getBoundingClientRect().width);
