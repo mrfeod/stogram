@@ -97,6 +97,11 @@ let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
 let layerInstanceCount = 0, layerLevels = new Float32Array(16),
     layerDofDepths = new Float32Array(16);
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
+let sceneGeneration = 0;
+const sceneCache = {
+  surface: null,
+  layers: null
+};
 const meshDepthBlurCache = new WeakMap();
 let layerHistogramSource = null, layerHistogramPeaks = [],
     autoLayerCount = true;
@@ -1798,6 +1803,7 @@ function reprocess(onDone = null) {
       processedDepth = gaussianBlur(rawDepth, mapW, mapH, ANALYSIS_SIGMA);
     cachedGpuFiltered = gpuFiltered;
     rebuildDepthPreview(gpuFiltered);
+    sceneGeneration++;
     buildMesh();
     sched();
     if (onDone) onDone();
@@ -2078,10 +2084,47 @@ function removeSmallMaskComponents(mask, w, h, minArea, minThickness = 3) {
   }
 }
 
+function activateCachedScene(mode) {
+  const cached = sceneCache[mode];
+  if (!cached || cached.generation !== sceneGeneration) return false;
+  if (mode === 'layers' && cached.shape !== currentShape()) return false;
+  meshIndexCount = cached.indexCount;
+  meshSourceBounds = {...cached.bounds};
+  if (mode === 'layers') {
+    layerInstanceCount = cached.instanceCount;
+    layerLevels.set(cached.levels);
+    layerDofDepths.set(cached.dofDepths);
+    surfaceUsesDepthTexture = false;
+  } else {
+    layerInstanceCount = 0;
+    surfaceUsesDepthTexture = true;
+    surfaceGridKey = cached.gridKey;
+  }
+  return true;
+}
+
+function prepareScene(mode, onDone = null) {
+  if (activateCachedScene(mode)) {
+    sched();
+    requestAnimationFrame(() => requestAnimationFrame(
+        () => onDone && onDone()));
+    return;
+  }
+  // Yield so the compositor can keep animating the captured old frame while
+  // CPU morphology and GPU uploads prepare the missing representation.
+  setTimeout(() => {
+    buildMesh();
+    sched();
+    requestAnimationFrame(() => requestAnimationFrame(
+        () => onDone && onDone()));
+  }, 0);
+}
+
 function buildMesh() {
   if (!processedDepth) return;
   downloadStlBtn.disabled = false;
   const mode = currentViewMode();
+  if (activateCachedScene(mode)) return;
   // Layers need pixel-accurate masks to avoid staircase silhouettes, but a
   // full-resolution grid still makes CPU morphology expensive on huge images.
   // Keep a 1:1 grid up to 2048 rows, then resample uniformly instead of
@@ -2108,7 +2151,6 @@ function buildMesh() {
 
   if (mode === 'layers') {
     surfaceUsesDepthTexture = false;
-    surfaceGridKey = '';
     // Independent horizontal cut-out planes. Convex and concave use opposite
     // cut rules.
     const layerSource =
@@ -2249,6 +2291,15 @@ function buildMesh() {
       minX: -1, maxX: 1, minY: bottom, maxY: top,
       minD: Math.min(...renderLevels), maxD: Math.max(...renderLevels)
     };
+    sceneCache.layers = {
+      generation: sceneGeneration,
+      shape: sign,
+      indexCount: meshIndexCount,
+      instanceCount: layerInstanceCount,
+      levels: layerLevels.slice(),
+      dofDepths: layerDofDepths.slice(),
+      bounds: {...meshSourceBounds}
+    };
     return;
 
   }
@@ -2272,7 +2323,18 @@ function buildMesh() {
       gl.TEXTURE_2D, 0, gl.R16F, mapW, mapH, 0, gl.RED, gl.FLOAT, surfaceMap);
   surfaceUsesDepthTexture = true;
   const key = `${mapW}:${mapH}:${cropX}:${stepPx}`;
-  if (key === surfaceGridKey) return;
+  if (key === surfaceGridKey) {
+    const previous = sceneCache.surface;
+    sceneCache.surface = {
+      generation: sceneGeneration,
+      indexCount: previous?.indexCount || meshIndexCount,
+      bounds: previous?.bounds || {...meshSourceBounds},
+      gridKey: key
+    };
+    meshIndexCount = sceneCache.surface.indexCount;
+    meshSourceBounds = {...sceneCache.surface.bounds};
+    return;
+  }
   surfaceGridKey = key;
   const topVertexCount = nx * ny;
   const perimeter = [];
@@ -2369,6 +2431,12 @@ function buildMesh() {
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+  sceneCache.surface = {
+    generation: sceneGeneration,
+    indexCount: meshIndexCount,
+    bounds: {...meshSourceBounds},
+    gridKey: key
+  };
 }
 
 function morphMask(mask, w, h, r, dilate) {
@@ -3211,10 +3279,12 @@ depthR.oninput = () => {
 };
 layersR.oninput = () => {
   autoLayerCount = false;
+  sceneCache.layers = null;
   buildMesh();
   sched();
 };
 fragmentCleanupR.oninput = () => {
+  sceneCache.layers = null;
   buildMesh();
   sched();
 };
@@ -3222,6 +3292,7 @@ const scheduleLayerMorph = () => {
   clearTimeout(layerMorphTimer);
   layerMorphTimer = setTimeout(() => {
     if (currentViewMode() !== 'layers') return;
+    sceneCache.layers = null;
     buildMesh();
     sched();
   }, 60);
@@ -3327,7 +3398,10 @@ document.querySelectorAll('input[name="shape"]')
       // before a potentially expensive mesh/layer rebuild blocks this thread.
       requestAnimationFrame(() => {
         rebuildDepthPreview();
-        if (currentViewMode() !== 'depthmap') buildMesh();
+        if (currentViewMode() !== 'depthmap') {
+          if (currentViewMode() === 'layers') sceneCache.layers = null;
+          buildMesh();
+        }
         sched();
         requestAnimationFrame(() => requestAnimationFrame(() => {
           finishTransitionFrame(token, () => {
@@ -3365,8 +3439,8 @@ document.querySelectorAll('input[name="viewmode"]')
         updateLayerUi();
         cv.style.display = 'block';
         depthCv.style.display = 'none';
-        reprocess(() => requestAnimationFrame(() => requestAnimationFrame(
-            () => animateObjectOpacity(1, 300, token))));
+        prepareScene(targetMode,
+            () => animateObjectOpacity(1, 300, token));
         return;
       }
       const crossfade3d = processedDepth &&
@@ -3382,10 +3456,10 @@ document.querySelectorAll('input[name="viewmode"]')
         renderedViewMode = targetMode;
         applyCameraMode(targetMode);
         updateLayerUi();
-        reprocess(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+        prepareScene(targetMode, () => {
           finishTransitionFrame(
               token, () => animateObjectOpacity(1, 300, token));
-        })));
+        });
         return;
       }
       ++viewTransitionToken;
@@ -3395,7 +3469,7 @@ document.querySelectorAll('input[name="viewmode"]')
       // frame, preventing a transient frame with mixed mesh/layer parameters.
       applyCameraMode(targetMode);
       updateLayerUi();
-      reprocess();
+      if (targetMode !== 'depthmap') prepareScene(targetMode);
       sched();
     });
 
