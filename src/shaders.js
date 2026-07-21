@@ -358,6 +358,7 @@ uniform float uAmbient,uDiffuse,uFill,uShadowStrength,uSelfShade,uSpecular,uShin
 uniform float uSkyEnabled,uSkyYaw,uSkyPitch,uSkyAspect,uSkyFov;
 uniform float uSkyBlur,uSkyBrightness,uSkySaturation,uSkyVignette;
 uniform float uSkyYawParallax,uSkyPitchParallax;
+uniform float uObjectOpacity;
 out vec4 outColor;
 vec3 skyColor(){
   // Project the view ray onto an infinite cylinder. Longitude wraps, while
@@ -428,7 +429,8 @@ void main(){
   float direct=(1.0-shadowAmount)*uDiffuse*ndl;
   float illumination=uAmbient + uFill + direct - selfShade;
   vec3 color=albedo*illumination + vec3(uSpecular*spec*(1.0-shadowAmount));
-  outColor=vec4(clamp(color,0.0,1.0),1.0);
+  vec3 background=uSkyEnabled>0.5?skyColor():vec3(0.045,0.05,0.06);
+  outColor=vec4(mix(background,clamp(color,0.0,1.0),uObjectOpacity),1.0);
 }`;
 
 export const DOF_FRAGMENT_SHADER = `#version 300 es

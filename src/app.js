@@ -4,6 +4,7 @@ import {computeCostVolumeGpu, filterDepthMapGpu} from './depth-gpu.js';
 'use strict';
 const $ = s => document.querySelector(s);
 const cv = $('#view'), depthCv = $('#depthView'),
+      transitionCv = $('#transitionView'),
       depthCtx = depthCv.getContext('2d'), fi = $('#file'),
       textureFi = $('#textureFile'), drop = $('#drop'), thumb = $('#thumb'),
       stage = cv.parentElement,
@@ -86,6 +87,10 @@ let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
 const activePointers = new Map();
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
     dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
+let objectOpacity = 1, viewTransitionToken = 0;
+let skyYawOffset = 0, skyPitchOffset = 0;
+let renderedViewMode = 'surface';
+let renderedShape = '1';
 let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0, layerMorphTimer = 0;
@@ -618,6 +623,7 @@ function saveCameraState(mode) {
 }
 function applyCameraMode(mode) {
   if (mode === activeCameraMode || !cameraStates[mode]) return;
+  const previousYaw = yaw, previousPitch = pitch;
   saveCameraState(activeCameraMode);
   const state = cameraStates[mode];
   yaw = state.yaw;
@@ -625,6 +631,10 @@ function applyCameraMode(mode) {
   zoom = state.zoom;
   cameraFov = state.fov;
   cameraDistance = state.distance;
+  // A camera preset belongs to the object, not to the surrounding cylinder.
+  // Counteract the preset jump so the effective sky orientation is unchanged.
+  skyYawOffset += previousYaw - yaw;
+  skyPitchOffset += previousPitch - pitch;
   inertiaYaw = 0;
   inertiaPitch = 0;
   autoBaseYaw = yaw;
@@ -866,7 +876,8 @@ const LU = {
   skySaturation: gl.getUniformLocation(lightProg, 'uSkySaturation'),
   skyVignette: gl.getUniformLocation(lightProg, 'uSkyVignette'),
   skyYawParallax: gl.getUniformLocation(lightProg, 'uSkyYawParallax'),
-  skyPitchParallax: gl.getUniformLocation(lightProg, 'uSkyPitchParallax')
+  skyPitchParallax: gl.getUniformLocation(lightProg, 'uSkyPitchParallax'),
+  objectOpacity: gl.getUniformLocation(lightProg, 'uObjectOpacity')
 };
 const DU = {
   color: gl.getUniformLocation(dofProg, 'uColorTex'),
@@ -3003,16 +3014,19 @@ function render() {
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.uniform1i(LU.skyTex, 7);
   gl.uniform1f(LU.skyEnabled, textureLoaded ? 1 : 0);
-  gl.uniform1f(LU.skyYaw, yaw);
-  gl.uniform1f(LU.skyPitch, pitch);
+  gl.uniform1f(LU.skyYaw, yaw + skyYawOffset);
+  gl.uniform1f(LU.skyPitch, pitch + skyPitchOffset);
   gl.uniform1f(LU.skyAspect, cv.width / Math.max(1, cv.height));
-  gl.uniform1f(LU.skyFov, cameraFov);
+  // The environment has its own fixed lens; mesh/layer camera presets must
+  // not zoom the cylinder when they switch between 45° and 10°.
+  gl.uniform1f(LU.skyFov, 45);
   gl.uniform1f(LU.skyBlur, +skyBlurR.value);
   gl.uniform1f(LU.skyBrightness, +skyBrightnessR.value);
   gl.uniform1f(LU.skySaturation, +skySaturationR.value);
   gl.uniform1f(LU.skyVignette, +skyVignetteR.value);
   gl.uniform1f(LU.skyYawParallax, +skyYawParallaxR.value);
   gl.uniform1f(LU.skyPitchParallax, +skyPitchParallaxR.value);
+  gl.uniform1f(LU.objectOpacity, objectOpacity);
   gl.uniform2f(LU.shadowTexel, 1 / shadowSize, 1 / shadowSize);
   gl.uniformMatrix4fv(LU.lightVP, false, lightVP);
   gl.uniform3f(LU.lightDir, ld.x, ld.y, ld.z);
@@ -3216,17 +3230,170 @@ layerPreErodeR.oninput = scheduleLayerMorph;
 layerDilateR.oninput = scheduleLayerMorph;
 layerBlurR.oninput = scheduleLayerMorph;
 layerErodeR.oninput = scheduleLayerMorph;
+function animateDepthOpacity(target, duration, token, onDone) {
+  const start = performance.now(), initial = Number(depthCv.style.opacity || 1);
+  const tick = now => {
+    if (token !== viewTransitionToken) return;
+    const t = Math.min(1, (now - start) / duration),
+          eased = t * t * (3 - 2 * t);
+    depthCv.style.opacity = String(initial + (target - initial) * eased);
+    if (t < 1) requestAnimationFrame(tick);
+    else if (onDone) onDone();
+  };
+  requestAnimationFrame(tick);
+}
+function animateObjectOpacity(target, duration, token, onDone) {
+  const start = performance.now(), initial = objectOpacity;
+  const tick = now => {
+    if (token !== viewTransitionToken) return;
+    const t = Math.min(1, (now - start) / duration),
+          eased = t * t * (3 - 2 * t);
+    objectOpacity = initial + (target - initial) * eased;
+    sched();
+    if (t < 1) requestAnimationFrame(tick);
+    else if (onDone) onDone();
+  };
+  requestAnimationFrame(tick);
+}
+function captureTransitionFrame(source) {
+  transitionCv.width = source.width;
+  transitionCv.height = source.height;
+  const context = transitionCv.getContext('2d');
+  context.clearRect(0, 0, transitionCv.width, transitionCv.height);
+  if (source === cv) {
+    // The default WebGL backbuffer may be discarded immediately after
+    // presentation. Render the old state once more and read it synchronously
+    // instead of copying a potentially cleared (black) canvas.
+    render();
+    const w = cv.width, h = cv.height,
+          pixels = new Uint8Array(w * h * 4),
+          flipped = new Uint8ClampedArray(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const stride = w * 4;
+    for (let y = 0; y < h; y++)
+      flipped.set(
+          pixels.subarray((h - 1 - y) * stride, (h - y) * stride),
+          y * stride);
+    context.putImageData(new ImageData(flipped, w, h), 0, 0);
+  } else {
+    context.drawImage(source, 0, 0);
+  }
+  transitionCv.style.display = 'block';
+  transitionCv.style.opacity = '1';
+  transitionCv.style.transform = 'scale(1)';
+  transitionCv.style.transition = 'none';
+  transitionCv.classList.remove('preparing');
+  void transitionCv.offsetWidth;
+  transitionCv.classList.add('preparing');
+}
+function finishTransitionFrame(token, onDone) {
+  if (token !== viewTransitionToken) return;
+  const remaining = 150;
+  const computed = getComputedStyle(transitionCv),
+        transform = computed.transform,
+        opacity = computed.opacity;
+  transitionCv.classList.remove('preparing');
+  transitionCv.style.transform = transform;
+  transitionCv.style.opacity = opacity;
+  transitionCv.style.transition = 'none';
+  void transitionCv.offsetWidth;
+  transitionCv.style.transition =
+      `opacity ${remaining}ms linear, transform ${remaining}ms ease-out`;
+  transitionCv.style.opacity = '0';
+  transitionCv.style.transform = 'scale(1)';
+  setTimeout(() => {
+    if (token !== viewTransitionToken) return;
+    transitionCv.style.display = 'none';
+    transitionCv.style.opacity = '1';
+    transitionCv.style.transform = 'scale(1)';
+    transitionCv.style.transition = 'none';
+    if (onDone) onDone();
+  }, remaining + 5);
+}
 document.querySelectorAll('input[name="shape"]')
     .forEach(el => el.onchange = () => {
-      rebuildDepthPreview();
-      if (currentViewMode() !== 'depthmap') buildMesh();
-      sched();
+      if (!processedDepth) return;
+      const token = ++viewTransitionToken;
+      const previousShape = renderedShape;
+      const depthMode = currentViewMode() === 'depthmap';
+      document.querySelector(
+          `input[name="shape"][value="${previousShape}"]`).checked = true;
+      captureTransitionFrame(depthMode ? depthCv : cv);
+      el.checked = true;
+      renderedShape = el.value;
+      if (depthMode) depthCv.style.opacity = '0';
+      else objectOpacity = 0;
+      // Yield once so the compositor can start the preparation animation
+      // before a potentially expensive mesh/layer rebuild blocks this thread.
+      requestAnimationFrame(() => {
+        rebuildDepthPreview();
+        if (currentViewMode() !== 'depthmap') buildMesh();
+        sched();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          finishTransitionFrame(token, () => {
+            if (depthMode) animateDepthOpacity(1, 300, token);
+            else animateObjectOpacity(1, 300, token);
+          });
+        }));
+      });
     });
 document.querySelectorAll('input[name="viewmode"]')
     .forEach(el => el.onchange = () => {
+      const targetMode = el.value, previousMode = renderedViewMode;
+      if (processedDepth && targetMode === 'depthmap' &&
+          previousMode !== 'depthmap') {
+        const token = ++viewTransitionToken;
+        document.querySelector(
+            `input[name="viewmode"][value="${previousMode}"]`).checked = true;
+        captureTransitionFrame(cv);
+        el.checked = true;
+        renderedViewMode = targetMode;
+        renderDepthMap();
+        updateLayerUi();
+        depthCv.style.display = 'block';
+        depthCv.style.opacity = '0';
+        finishTransitionFrame(
+            token, () => animateDepthOpacity(1, 300, token, sched));
+        return;
+      }
+      if (processedDepth && previousMode === 'depthmap' &&
+          targetMode !== 'depthmap') {
+        const token = ++viewTransitionToken;
+        renderedViewMode = targetMode;
+        applyCameraMode(targetMode);
+        objectOpacity = 0;
+        updateLayerUi();
+        cv.style.display = 'block';
+        depthCv.style.display = 'none';
+        reprocess(() => requestAnimationFrame(() => requestAnimationFrame(
+            () => animateObjectOpacity(1, 300, token))));
+        return;
+      }
+      const crossfade3d = processedDepth &&
+          ((previousMode === 'surface' && targetMode === 'layers') ||
+           (previousMode === 'layers' && targetMode === 'surface'));
+      if (crossfade3d) {
+        const token = ++viewTransitionToken;
+        document.querySelector(
+            `input[name="viewmode"][value="${previousMode}"]`).checked = true;
+        captureTransitionFrame(cv);
+        el.checked = true;
+        objectOpacity = 0;
+        renderedViewMode = targetMode;
+        applyCameraMode(targetMode);
+        updateLayerUi();
+        reprocess(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+          finishTransitionFrame(
+              token, () => animateObjectOpacity(1, 300, token));
+        })));
+        return;
+      }
+      ++viewTransitionToken;
+      objectOpacity = 1;
+      renderedViewMode = targetMode;
       // Swap the complete camera preset before rebuilding or scheduling a
       // frame, preventing a transient frame with mixed mesh/layer parameters.
-      applyCameraMode(currentViewMode());
+      applyCameraMode(targetMode);
       updateLayerUi();
       reprocess();
       sched();
