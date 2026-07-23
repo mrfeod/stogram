@@ -13,8 +13,12 @@ const cv = $('#view'), depthCv = $('#depthView'),
 const downloadDepthBtn = $('#downloadDepth'),
       meshDownloads = $('#meshDownloads'), downloadStlBtn = $('#downloadStl'),
       layerDownloads = $('#layerDownloads'),
-      downloadLayersPngBtn = $('#downloadLayersPng');
-const depthR = $('#depth'), depthN = $('#depthNum');
+      layersFullscreenBtn = $('#layersFullscreen');
+const depthControl = $('#depthControl'),
+      depthR = $('#depth'), depthN = $('#depthNum'),
+      dofStrengthControl = $('#dofStrengthControl'),
+      dofStrengthR = $('#dofStrength'),
+      dofStrengthN = $('#dofStrengthNum');
 const layersR = $('#layers'), layersN = $('#layersNum');
 const fragmentCleanupR = $('#fragmentCleanup'),
       fragmentCleanupN = $('#fragmentCleanupNum');
@@ -74,11 +78,12 @@ let mapW = 0, mapH = 0, cropX = 0, bgDepth = .5;
 let grayMap = null, confMap = null, rawDepth = null, processedDepth = null,
     cleanDepthMap = null, meshDepthMap = null, depthPreview = null, depthPreviewW = 0,
     depthPreviewH = 0, depthCoverage = null, cachedGpuFiltered = null;
-let yaw = -.22, pitch = -.16, zoom = 1, cameraFov = 45,
-    cameraDistance = 3.2, drag = false;
-let activeCameraMode = 'surface';
+let yaw = 0, pitch = 0, zoom = 1, cameraFov = 15,
+    cameraDistance = 10, drag = false;
+let activeCameraMode = 'eye';
 const cameraStates = {
   surface: {yaw: -.22, pitch: -.16, zoom: 1, fov: 45, distance: 3.2},
+  eye: {yaw: 0, pitch: 0, zoom: 1, fov: 15, distance: 10},
   layers: {
     yaw: -5 * Math.PI / 180, pitch: 5 * Math.PI / 180,
     zoom: 1, fov: 10, distance: 15
@@ -86,19 +91,22 @@ const cameraStates = {
 };
 let gestureMode = 'none', pinchDistance = 0, gesturePointerId = null,
     lastGestureX = 0, lastGestureY = 0, lastGestureTime = 0,
-    inertiaYaw = 0, inertiaPitch = 0;
+    inertiaYaw = 0, inertiaPitch = 0,
+    cameraTargetYaw = yaw, cameraTargetPitch = pitch;
+let orientationControlState = 'idle', orientationCenter = null;
 const activePointers = new Map();
 let autoRotate = false, autoPauseUntil = 0, lastFrame = performance.now(),
-    dirty = true, autoTime = 0, autoBaseYaw = -.22, autoBasePitch = -.16;
+    dirty = true, autoTime = 0, autoBaseYaw = 0, autoBasePitch = 0;
 let objectOpacity = 1, viewTransitionToken = 0;
 let skyYawOffset = 0, skyPitchOffset = 0;
-let renderedViewMode = 'surface';
+let renderedViewMode = 'eye';
 let renderedShape = '1';
 let voidPatternTime = 0, lastVoidPatternFrame = 0;
 let meshIndexCount = 0, processTimer = 0, disparityWorker = null,
     analysisJob = 0, layerMorphTimer = 0;
-let layerInstanceCount = 0, layerLevels = new Float32Array(16),
-    layerDofDepths = new Float32Array(16), layerExportData = null;
+let layerInstanceCount = 0, layerBackgroundIndex = 0,
+    layerLevels = new Float32Array(16),
+    layerDofDepths = new Float32Array(16);
 let surfaceGridKey = '', surfaceUsesDepthTexture = false;
 let sceneGeneration = 0;
 const sceneCache = {
@@ -107,8 +115,7 @@ const sceneCache = {
 };
 function invalidateSceneCaches() {
   sceneGeneration++;
-  layerExportData = null;
-  downloadLayersPngBtn.disabled = true;
+  layersFullscreenBtn.disabled = true;
 }
 const meshDepthBlurCache = new WeakMap();
 let layerHistogramSource = null, layerHistogramPeaks = [],
@@ -561,8 +568,14 @@ function currentShape() {
 function currentViewMode() {
   return document.querySelector('input[name="viewmode"]:checked').value;
 }
+function isLayerView(mode = currentViewMode()) {
+  return mode === 'eye' || mode === 'layers';
+}
+function isEyeView(mode = currentViewMode()) {
+  return mode === 'eye';
+}
 function effectiveDepthScale() {
-  return currentViewMode() === 'layers' ? 1 : (+depthR.value || 0) / 100;
+  return isLayerView() ? 1 : (+depthR.value || 0) / 100;
 }
 function clampSliderValue(el, v) {
   let n = Number(v);
@@ -634,6 +647,78 @@ function saveCameraState(mode) {
     yaw, pitch, zoom, fov: cameraFov, distance: cameraDistance
   };
 }
+const LAYER_ANGLE_LIMIT = 3 * Math.PI / 180;
+function clampCameraAngles() {
+  if (!isEyeView()) {
+    pitch = Math.max(-1.35, Math.min(1.35, pitch));
+    return;
+  }
+  yaw = Math.max(-LAYER_ANGLE_LIMIT, Math.min(LAYER_ANGLE_LIMIT, yaw));
+  pitch = Math.max(-LAYER_ANGLE_LIMIT, Math.min(LAYER_ANGLE_LIMIT, pitch));
+}
+function updateCameraAngleControls(mode) {
+  const layers = mode === 'eye';
+  for (const input of [cameraYawR, cameraYawN]) {
+    input.min = layers ? '-3' : '-180';
+    input.max = layers ? '3' : '180';
+  }
+  for (const input of [cameraPitchR, cameraPitchN]) {
+    input.min = layers ? '-3' : '-80';
+    input.max = layers ? '3' : '80';
+  }
+}
+function orientedTilt(beta, gamma) {
+  const angle = ((screen.orientation?.angle ??
+      window.orientation ?? 0) % 360 + 360) % 360;
+  if (angle === 90) return {x: beta, y: -gamma};
+  if (angle === 270) return {x: -beta, y: gamma};
+  if (angle === 180) return {x: -gamma, y: -beta};
+  return {x: gamma, y: beta};
+}
+function handleDeviceOrientation(event) {
+  if (!isEyeView() || autoRotate ||
+      activePointers.size || event.beta == null || event.gamma == null)
+    return;
+  const tilt = orientedTilt(event.beta, event.gamma);
+  if (!orientationCenter) {
+    orientationCenter = tilt;
+    return;
+  }
+  // Roughly 18 degrees of physical tilt spans the deliberately small
+  // three-degree layer-camera range. The existing spring filters sensor noise.
+  const sensorRange = 18;
+  cameraTargetYaw = Math.max(-LAYER_ANGLE_LIMIT, Math.min(
+      LAYER_ANGLE_LIMIT,
+      (tilt.x - orientationCenter.x) / sensorRange * LAYER_ANGLE_LIMIT));
+  cameraTargetPitch = Math.max(-LAYER_ANGLE_LIMIT, Math.min(
+      LAYER_ANGLE_LIMIT,
+      (tilt.y - orientationCenter.y) / sensorRange * LAYER_ANGLE_LIMIT));
+  sched();
+}
+async function enableOrientationControl() {
+  if (orientationControlState !== 'idle' ||
+      !('DeviceOrientationEvent' in window))
+    return;
+  orientationControlState = 'requesting';
+  try {
+    const requestPermission =
+        window.DeviceOrientationEvent.requestPermission;
+    if (typeof requestPermission === 'function' &&
+        await requestPermission.call(window.DeviceOrientationEvent) !==
+            'granted') {
+      orientationControlState = 'denied';
+      return;
+    }
+    addEventListener('deviceorientation', handleDeviceOrientation, {
+      passive: true
+    });
+    orientationCenter = null;
+    orientationControlState = 'enabled';
+  } catch (error) {
+    orientationControlState = 'denied';
+    console.info('Device orientation control is unavailable:', error);
+  }
+}
 function applyCameraMode(mode) {
   if (mode === activeCameraMode || !cameraStates[mode]) return;
   const previousYaw = yaw, previousPitch = pitch;
@@ -644,12 +729,17 @@ function applyCameraMode(mode) {
   zoom = state.zoom;
   cameraFov = state.fov;
   cameraDistance = state.distance;
+  updateCameraAngleControls(mode);
+  clampCameraAngles();
   // A camera preset belongs to the object, not to the surrounding cylinder.
   // Counteract the preset jump so the effective sky orientation is unchanged.
   skyYawOffset += previousYaw - yaw;
   skyPitchOffset += previousPitch - pitch;
   inertiaYaw = 0;
   inertiaPitch = 0;
+  cameraTargetYaw = yaw;
+  cameraTargetPitch = pitch;
+  orientationCenter = null;
   autoBaseYaw = yaw;
   autoBasePitch = pitch;
   activeCameraMode = mode;
@@ -689,12 +779,14 @@ function pauseAuto(ms = 1800) {
 function resetCamera() {
   inertiaYaw = 0;
   inertiaPitch = 0;
-  const layersMode = currentViewMode() === 'layers';
-  yaw = layersMode ? -5 * Math.PI / 180 : -.22;
-  pitch = layersMode ? 5 * Math.PI / 180 : -.16;
-  zoom = 1;
-  cameraFov = layersMode ? 10 : 45;
-  cameraDistance = layersMode ? 15 : 3.2;
+  const mode = currentViewMode(), state = cameraStates[mode] ||
+      cameraStates.surface;
+  yaw = state.yaw;
+  pitch = state.pitch;
+  zoom = state.zoom;
+  cameraFov = state.fov;
+  cameraDistance = state.distance;
+  updateCameraAngleControls(mode);
   setPair(cameraYawR, cameraYawN, yaw * 180 / Math.PI);
   setPair(cameraPitchR, cameraPitchN, pitch * 180 / Math.PI);
   setPair(cameraZoomR, cameraZoomN, zoom);
@@ -702,8 +794,10 @@ function resetCamera() {
   setPair(cameraDistanceR, cameraDistanceN, cameraDistance);
   autoBaseYaw = yaw;
   autoBasePitch = pitch;
+  cameraTargetYaw = yaw;
+  cameraTargetPitch = pitch;
   autoTime = 0;
-  saveCameraState(layersMode ? 'layers' : 'surface');
+  saveCameraState(mode);
   pauseAuto(700);
   sched();
 }
@@ -799,7 +893,6 @@ gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(6 * 5), gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 5 * 4, 0);
 gl.bindVertexArray(null);
-
 const GU = {
   yaw: gl.getUniformLocation(gProg, 'uYaw'),
   pitch: gl.getUniformLocation(gProg, 'uPitch'),
@@ -808,6 +901,7 @@ const GU = {
   zoom: gl.getUniformLocation(gProg, 'uZoom'),
   cameraDistance: gl.getUniformLocation(gProg, 'uCameraDistance'),
   fov: gl.getUniformLocation(gProg, 'uFov'),
+  orthographic: gl.getUniformLocation(gProg, 'uOrthographic'),
   aspect: gl.getUniformLocation(gProg, 'uAspect'),
   sourceTex: gl.getUniformLocation(gProg, 'uSourceTex'),
   depthTex: gl.getUniformLocation(gProg, 'uDepthTex'),
@@ -839,11 +933,17 @@ const LGU = {
   cameraDistance: gl.getUniformLocation(layerGProg, 'uCameraDistance'),
   fov: gl.getUniformLocation(layerGProg, 'uFov'),
   orthographic: gl.getUniformLocation(layerGProg, 'uOrthographic'),
+  eyeView: gl.getUniformLocation(layerGProg, 'uEyeView'),
   aspect: gl.getUniformLocation(layerGProg, 'uAspect'),
   sourceCrop: gl.getUniformLocation(layerGProg, 'uSourceCrop'),
   sourceAspect: gl.getUniformLocation(layerGProg, 'uSourceAspect'),
+  imageAspect: gl.getUniformLocation(layerGProg, 'uImageAspect'),
   backPass: gl.getUniformLocation(layerGProg, 'uBackPass'),
   levels: gl.getUniformLocation(layerGProg, 'uLayerLevels[0]'),
+  backgroundLayer: gl.getUniformLocation(layerGProg, 'uBackgroundLayer'),
+  backgroundLevel: gl.getUniformLocation(layerGProg, 'uBackgroundLevel'),
+  bounds: gl.getUniformLocation(layerGProg, 'uLayerBounds'),
+  viewport: gl.getUniformLocation(layerGProg, 'uViewport'),
   sourceTex: gl.getUniformLocation(layerGProg, 'uSourceTex'),
   masks: gl.getUniformLocation(layerGProg, 'uLayerMasks')
 };
@@ -1107,7 +1207,7 @@ function computeLightVP() {
   const d = lightDirCameraSpace();
   const L = vec3Norm(d.x, d.y, d.z);
   const requestedScale = effectiveDepthScale();
-  const scale = currentViewMode() === 'layers' ?
+  const scale = isLayerView() ?
       Math.max(0.01, requestedScale) : requestedScale;
   const sign = currentShape();
   const b = meshSourceBounds;
@@ -1185,7 +1285,7 @@ function renderShadowMap(lightVP) {
   gl.viewport(0, 0, shadowSize, shadowSize);
   gl.clear(gl.DEPTH_BUFFER_BIT);
   gl.colorMask(false, false, false, false);
-  if (currentViewMode() === 'layers' && layerInstanceCount) {
+  if (isLayerView() && layerInstanceCount) {
     gl.useProgram(layerShadowProg);
     gl.bindVertexArray(layerVao);
     gl.uniform1f(LSU.yaw, yaw);
@@ -1222,7 +1322,7 @@ function renderShadowMap(lightVP) {
   gl.uniform1i(SU.depthTex, 5);
   gl.uniformMatrix4fv(SU.lightVP, false, lightVP);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
-  if (!surfaceUsesDepthTexture && currentViewMode() === 'layers') {
+  if (!surfaceUsesDepthTexture && isLayerView()) {
     gl.uniform1f(SU.backPass, 1);
     gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
   }
@@ -1236,7 +1336,7 @@ function renderGBuffer() {
   gl.viewport(0, 0, cv.width, cv.height);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  if (currentViewMode() === 'layers' && layerInstanceCount) {
+  if (isLayerView() && layerInstanceCount) {
     gl.useProgram(layerGProg);
     gl.bindVertexArray(layerVao);
     gl.uniform1f(LGU.yaw, yaw);
@@ -1247,18 +1347,34 @@ function renderGBuffer() {
     gl.uniform1f(LGU.cameraDistance, cameraDistance);
     gl.uniform1f(LGU.fov, cameraFov);
     gl.uniform1f(LGU.orthographic, layersOrthographic.checked ? 1 : 0);
+    gl.uniform1f(LGU.eyeView, isEyeView() ? 1 : 0);
     gl.uniform1f(LGU.aspect, cv.width / Math.max(1, cv.height));
     gl.uniform1f(LGU.sourceCrop, cropX / Math.max(1, mapW));
     gl.uniform1f(LGU.sourceAspect, mapH / Math.max(1, mapW - cropX));
+    gl.uniform1f(
+        LGU.imageAspect,
+        (textureImage?.naturalWidth || textureImage?.width || mapW) /
+        Math.max(
+            1, textureImage?.naturalHeight || textureImage?.height || mapH));
     gl.uniform1f(LGU.backPass, 0);
     gl.uniform1fv(LGU.levels, layerLevels);
+    gl.uniform1i(LGU.backgroundLayer, layerBackgroundIndex);
+    gl.uniform1f(
+        LGU.backgroundLevel, layerLevels[layerBackgroundIndex] || 0);
+    gl.uniform4f(
+        LGU.bounds, meshSourceBounds.minX, meshSourceBounds.maxX,
+        meshSourceBounds.minY, meshSourceBounds.maxY);
+    gl.uniform2f(LGU.viewport, cv.width, cv.height);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, sourceTex);
     gl.uniform1i(LGU.sourceTex, 4);
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, layerMaskTex);
     gl.uniform1i(LGU.masks, 6);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, layerInstanceCount);
+    gl.disable(gl.CULL_FACE);
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return;
@@ -1272,6 +1388,7 @@ function renderGBuffer() {
   gl.uniform1f(GU.zoom, zoom);
   gl.uniform1f(GU.cameraDistance, cameraDistance);
   gl.uniform1f(GU.fov, cameraFov);
+  gl.uniform1f(GU.orthographic, 0);
   gl.uniform1f(GU.aspect, cv.width / Math.max(1, cv.height));
   gl.uniform1f(GU.sourceCrop, cropX / Math.max(1, mapW));
   gl.uniform1f(GU.sourceAspect, mapH / Math.max(1, mapW - cropX));
@@ -1285,7 +1402,7 @@ function renderGBuffer() {
   gl.bindTexture(gl.TEXTURE_2D, depthSurfaceTex);
   gl.uniform1i(GU.depthTex, 5);
   gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
-  if (!surfaceUsesDepthTexture && currentViewMode() === 'layers') {
+  if (!surfaceUsesDepthTexture && isLayerView()) {
     gl.uniform1f(GU.backPass, 1);
     gl.drawElements(gl.TRIANGLES, meshIndexCount, gl.UNSIGNED_INT, 0);
   }
@@ -1310,10 +1427,40 @@ resize();
 function frame(now) {
   const dt = Math.min(50, now - lastFrame);
   lastFrame = now;
-  if (!drag && !autoRotate &&
+  const layersCamera = isEyeView();
+  if (layersCamera && !autoRotate &&
+      (drag || Math.abs(cameraTargetYaw - yaw) > .00001 ||
+       Math.abs(cameraTargetPitch - pitch) > .00001 ||
+       Math.abs(inertiaYaw) > .000002 ||
+       Math.abs(inertiaPitch) > .000002)) {
+    // A damped spring makes the very small layer-camera range feel elastic
+    // instead of mapping every pointer pixel directly onto an angle.
+    const spring = .00038, damping = Math.exp(-dt / 72);
+    inertiaYaw =
+        (inertiaYaw + (cameraTargetYaw - yaw) * spring * dt) * damping;
+    inertiaPitch =
+        (inertiaPitch + (cameraTargetPitch - pitch) * spring * dt) * damping;
+    yaw += inertiaYaw * dt;
+    pitch += inertiaPitch * dt;
+    if (Math.abs(yaw) > LAYER_ANGLE_LIMIT) {
+      yaw = Math.sign(yaw) * LAYER_ANGLE_LIMIT;
+      inertiaYaw *= -.32;
+      if (!drag) cameraTargetYaw = Math.sign(yaw) * LAYER_ANGLE_LIMIT * .72;
+    }
+    if (Math.abs(pitch) > LAYER_ANGLE_LIMIT) {
+      pitch = Math.sign(pitch) * LAYER_ANGLE_LIMIT;
+      inertiaPitch *= -.32;
+      if (!drag)
+        cameraTargetPitch = Math.sign(pitch) * LAYER_ANGLE_LIMIT * .72;
+    }
+    autoBaseYaw = yaw;
+    autoBasePitch = pitch;
+    dirty = true;
+  } else if (!layersCamera && !drag && !autoRotate &&
       (Math.abs(inertiaYaw) > .000002 || Math.abs(inertiaPitch) > .000002)) {
     yaw += inertiaYaw * dt;
-    pitch = Math.max(-1.35, Math.min(1.35, pitch + inertiaPitch * dt));
+    pitch += inertiaPitch * dt;
+    clampCameraAngles();
     const damping = Math.exp(-dt / 420);
     inertiaYaw *= damping;
     inertiaPitch *= damping;
@@ -1325,7 +1472,12 @@ function frame(now) {
   }
   if (processedDepth && autoRotate && !drag && now > autoPauseUntil) {
     autoTime += dt * 0.001;
-    if (currentViewMode() === 'layers') {
+    if (isEyeView()) {
+      // Sweep the complete permitted layer-view range without allowing
+      // perspective angles that expose the cards as separate planes.
+      yaw = Math.sin(autoTime * 0.72) * LAYER_ANGLE_LIMIT;
+      pitch = Math.sin(autoTime * 0.41) * LAYER_ANGLE_LIMIT;
+    } else if (currentViewMode() === 'layers') {
       yaw = autoBaseYaw +
           Math.sin(autoTime * 0.72) * 10 * Math.PI / 180;
       pitch = autoBasePitch +
@@ -1355,16 +1507,24 @@ requestAnimationFrame(frame);
 
 function updateLayerUi() {
   const mode = currentViewMode();
-  if (mode === 'layers')
+  const layered = isLayerView(mode);
+  const dofActive = (+dofStrengthR.value || 0) > 0;
+  updateCameraAngleControls(mode);
+  syncCameraUi();
+  if (layered)
     setPair(depthR, depthN, 100);
   else if (mode === 'surface')
     setPair(depthR, depthN, meshDepthValue);
-  layersR.parentElement.classList.toggle('disabled', mode !== 'layers');
-  fragmentCleanupR.parentElement.classList.toggle('disabled', mode !== 'layers');
+  layersR.parentElement.classList.toggle('disabled', !layered);
+  fragmentCleanupR.parentElement.classList.toggle('disabled', !layered);
   document.querySelectorAll('.layer-morph').forEach(
       control => control.hidden = true);
-  dofSettings.hidden = mode !== 'layers';
-  if (mode !== 'layers') dofSettings.open = false;
+  dofSettings.hidden = true;
+  dofSettings.open = false;
+  dofSettings.querySelector('.settings-panel')?.classList.toggle(
+      'disabled', !dofActive);
+  depthControl.hidden = mode !== 'surface';
+  dofStrengthControl.hidden = !layered;
   const depthMode = mode === 'depthmap';
   cv.style.display = depthMode ? 'none' : 'block';
   depthCv.style.display = depthMode ? 'block' : 'none';
@@ -1372,9 +1532,8 @@ function updateLayerUi() {
   downloadDepthBtn.disabled = !depthPreview;
   meshDownloads.hidden = mode !== 'surface';
   downloadStlBtn.disabled = !processedDepth;
-  layerDownloads.hidden = mode !== 'layers';
-  downloadLayersPngBtn.disabled = !processedDepth;
-  depthR.parentElement.classList.toggle('disabled', mode !== 'surface');
+  layerDownloads.hidden = !layered;
+  layersFullscreenBtn.disabled = !processedDepth;
 }
 updateLayerUi();
 
@@ -2097,17 +2256,19 @@ function removeSmallMaskComponents(mask, w, h, minArea, minThickness = 3) {
 }
 
 function activateCachedScene(mode) {
-  const cached = sceneCache[mode];
+  const cacheMode = isLayerView(mode) ? 'layers' : mode,
+        cached = sceneCache[cacheMode];
   if (!cached || cached.generation !== sceneGeneration) return false;
-  if (mode === 'layers' && cached.shape !== currentShape()) return false;
+  if (isLayerView(mode) && cached.shape !== currentShape()) return false;
   meshIndexCount = cached.indexCount;
   meshSourceBounds = {...cached.bounds};
-  if (mode === 'layers') {
+  if (isLayerView(mode)) {
     layerInstanceCount = cached.instanceCount;
+    layerBackgroundIndex = cached.backgroundIndex ??
+        Math.max(0, cached.instanceCount - 1);
     layerLevels.set(cached.levels);
     layerDofDepths.set(cached.dofDepths);
-    layerExportData = cached.exportData || null;
-    downloadLayersPngBtn.disabled = !layerExportData;
+    layersFullscreenBtn.disabled = !processedDepth;
     surfaceUsesDepthTexture = false;
   } else {
     layerInstanceCount = 0;
@@ -2145,7 +2306,7 @@ function buildMesh() {
   // jumping abruptly from every pixel to every second pixel.
   const stepPx = MESH_STEP_PX;
   let xs, ys;
-  if (mode === 'layers') {
+  if (isLayerView(mode)) {
     const textureLimit = gl.getParameter(gl.MAX_TEXTURE_SIZE),
           ySamples = Math.min(mapH, LAYER_MAX_GRID_HEIGHT, textureLimit),
           scale = ySamples / Math.max(1, mapH),
@@ -2163,7 +2324,7 @@ function buildMesh() {
         centerX = (cropX + mapW - 1) * .5;
   const sign = currentShape();
 
-  if (mode === 'layers') {
+  if (isLayerView(mode)) {
     surfaceUsesDepthTexture = false;
     // Independent horizontal cut-out planes. Convex and concave use opposite
     // cut rules.
@@ -2257,13 +2418,16 @@ function buildMesh() {
       renderEntries.push({
         mask: masks[li],
         level: levels[li],
-        signedDepth: sign < 0 ? 1 - levels[li] : levels[li]
+        signedDepth: sign < 0 ? 1 - levels[li] : levels[li],
+        sourceLayer: li
       });
     }
     renderEntries.sort((a, b) => b.signedDepth - a.signedDepth);
     const renderMasks = renderEntries.map(entry => entry.mask),
           renderLevels = renderEntries.map(entry => entry.level);
     const renderLayerCount = renderMasks.length,
+          backgroundRenderIndex = Math.max(0, renderEntries.findIndex(
+              entry => entry.sourceLayer === backgroundLayer)),
           maskPixels = nx * ny,
           maskData = new Uint8Array(maskPixels * renderLayerCount);
     for (let li = 0; li < renderLayerCount; li++) {
@@ -2300,6 +2464,7 @@ function buildMesh() {
           ]);
     gl.bindBuffer(gl.ARRAY_BUFFER, layerVbo);
     gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    layerBackgroundIndex = backgroundRenderIndex;
     meshIndexCount = 6;
     meshSourceBounds = {
       minX: -1, maxX: 1, minY: bottom, maxY: top,
@@ -2310,19 +2475,12 @@ function buildMesh() {
       shape: sign,
       indexCount: meshIndexCount,
       instanceCount: layerInstanceCount,
+      backgroundIndex: layerBackgroundIndex,
       levels: layerLevels.slice(),
       dofDepths: layerDofDepths.slice(),
-      exportData: {
-        width: nx,
-        height: ny,
-        count: renderLayerCount,
-        masks: maskData,
-        depths: Float32Array.from(signedLevels)
-      },
       bounds: {...meshSourceBounds}
     };
-    layerExportData = sceneCache.layers.exportData;
-    downloadLayersPngBtn.disabled = false;
+    layersFullscreenBtn.disabled = false;
     return;
 
   }
@@ -3064,80 +3222,55 @@ downloadStlBtn.onclick = () => {
       'stogram-mesh.stl');
 };
 
-downloadLayersPngBtn.onclick = async () => {
-  if (currentViewMode() !== 'layers' || !processedDepth ||
-      !layerExportData || !textureImage) return;
-  downloadLayersPngBtn.disabled = true;
-  const sourceWidth = textureImage.naturalWidth || textureImage.width,
-        sourceHeight = textureImage.naturalHeight || textureImage.height,
-        sourceCropX = Math.round(sourceWidth * cropX / Math.max(1, mapW)),
-        width = Math.max(1, sourceWidth - sourceCropX),
-        height = Math.max(1, sourceHeight),
-        {width: maskWidth, height: maskHeight, count, masks, depths} =
-            layerExportData;
-  const output = document.createElement('canvas');
-  output.width = width;
-  output.height = height;
-  const outputContext = output.getContext('2d'),
-        maskCanvas = document.createElement('canvas'),
-        cardCanvas = document.createElement('canvas');
-  maskCanvas.width = maskWidth;
-  maskCanvas.height = maskHeight;
-  cardCanvas.width = width;
-  cardCanvas.height = height;
-  const maskContext = maskCanvas.getContext('2d'),
-        cardContext = cardCanvas.getContext('2d'),
-        maskImage = maskContext.createImageData(maskWidth, maskHeight),
-        maskPixels = maskWidth * maskHeight,
-        focusCount = Math.max(1, Math.round(+dofFocusR.value || 1)),
-        focusIndex = Math.min(count - 1, focusCount - 1),
-        referenceHeight = Math.max(
-            1, stage.getBoundingClientRect().height *
-                Math.min(devicePixelRatio || 1, 2)),
-        exportScale = height / referenceHeight,
-        maxBlur = Math.max(0, +dofBlurR.value || 0) * exportScale,
-        rate = Math.max(.0001, +dofRateR.value || .1),
-        power = Math.max(.01, +dofPowerR.value || .25);
-  // GPU instances are stored from front to back. Composite in reverse so the
-  // nearest card is the last one painted over the complete rear card.
-  for (let layer = count - 1; layer >= 0; layer--) {
-    const maskOffset = layer * maskPixels;
-    for (let i = 0, p = 0; i < maskPixels; i++, p += 4) {
-      const alpha = masks[maskOffset + i];
-      maskImage.data[p] = 255;
-      maskImage.data[p + 1] = 255;
-      maskImage.data[p + 2] = 255;
-      maskImage.data[p + 3] = alpha;
-    }
-    maskContext.putImageData(maskImage, 0, 0);
-    cardContext.clearRect(0, 0, width, height);
-    cardContext.globalCompositeOperation = 'source-over';
-    cardContext.drawImage(
-        textureImage, sourceCropX, 0, width, sourceHeight,
-        0, 0, width, height);
-    cardContext.globalCompositeOperation = 'destination-in';
-    cardContext.imageSmoothingEnabled = true;
-    cardContext.imageSmoothingQuality = 'high';
-    cardContext.drawImage(maskCanvas, 0, 0, width, height);
-    cardContext.globalCompositeOperation = 'source-over';
-    const delta = layer < focusCount ? 0 :
-        Math.max(0, depths[focusIndex] - depths[layer]),
-          curve = 1 - Math.exp(-delta * rate),
-          blur = layer < focusCount ? 0 :
-              maxBlur * Math.pow(Math.max(0, curve), power);
-    outputContext.filter = blur > .05 ? `blur(${blur.toFixed(2)}px)` : 'none';
-    outputContext.drawImage(cardCanvas, 0, 0);
-    // Let the browser present between large layer composites instead of
-    // freezing the interface for the whole export.
-    if ((count - layer) % 3 === 0)
-      await new Promise(resolve => requestAnimationFrame(resolve));
+function layerFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement;
+}
+async function toggleLayersFullscreen() {
+  if (!isLayerView()) return;
+  if (layerFullscreenElement()) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) await exit.call(document);
+    return;
   }
-  outputContext.filter = 'none';
-  output.toBlob(blob => {
-    if (blob) downloadBlob(blob, 'stogram-layers.png');
-    downloadLayersPngBtn.disabled = false;
-  }, 'image/png');
-};
+  if (document.body.classList.contains('layer-fullscreen')) {
+    document.body.classList.remove('layer-fullscreen');
+    resize();
+    return;
+  }
+  const request = stage.requestFullscreen || stage.webkitRequestFullscreen;
+  if (request) {
+    try {
+      await request.call(stage);
+      return;
+    } catch (error) {
+      console.info('Native fullscreen is unavailable:', error);
+    }
+  }
+  // iPhone browsers may not expose element fullscreen. Use the same layout
+  // as a fixed viewport overlay so the control remains functional there.
+  document.body.classList.add('layer-fullscreen');
+  resize();
+}
+layersFullscreenBtn.onclick = () => void toggleLayersFullscreen();
+function syncLayersFullscreen() {
+  const active = !!layerFullscreenElement() ||
+      document.body.classList.contains('layer-fullscreen');
+  layersFullscreenBtn.classList.toggle('active', active);
+  layersFullscreenBtn.textContent = active ? '×' : '⛶';
+  layersFullscreenBtn.setAttribute('aria-label',
+      active ? 'Выйти из полноэкранного режима' :
+          'Открыть слои на весь экран');
+  resize();
+}
+addEventListener('fullscreenchange', syncLayersFullscreen);
+addEventListener('webkitfullscreenchange', syncLayersFullscreen);
+addEventListener('keydown', event => {
+  if (event.key === 'Escape' &&
+      document.body.classList.contains('layer-fullscreen')) {
+    document.body.classList.remove('layer-fullscreen');
+    syncLayersFullscreen();
+  }
+});
 
 function render() {
   syncCameraUi();
@@ -3146,7 +3279,7 @@ function render() {
     return;
   }
   if (!processedDepth || !meshIndexCount) return;
-  const layersMode = currentViewMode() === 'layers';
+  const layersMode = isLayerView(), eyeMode = isEyeView();
   const lightVP = computeLightVP();
   if (!layersMode) renderShadowMap(lightVP);
   renderGBuffer();
@@ -3179,12 +3312,14 @@ function render() {
   gl.activeTexture(gl.TEXTURE7);
   gl.bindTexture(gl.TEXTURE_2D, sourceTex);
   gl.uniform1i(LU.skyTex, 7);
-  gl.uniform1f(LU.skyEnabled, textureLoaded ? 1 : 0);
+  // In Eye view the complete rear layer is the environment. Rendering the
+  // texture cylinder behind it only wastes fill-rate and leaks at AA edges.
+  gl.uniform1f(LU.skyEnabled, textureLoaded && !eyeMode ? 1 : 0);
   gl.uniform1f(LU.skyYaw, yaw + skyYawOffset);
   gl.uniform1f(LU.skyPitch, pitch + skyPitchOffset);
   gl.uniform1f(LU.skyAspect, cv.width / Math.max(1, cv.height));
-  // The environment has its own fixed lens; mesh/layer camera presets must
-  // not zoom the cylinder when they switch between 45° and 10°.
+  // The environment has its own fixed lens; mesh camera presets must not
+  // zoom it. Layer mode disables the environment entirely.
   gl.uniform1f(LU.skyFov, 45);
   gl.uniform1f(LU.skyBlur, +skyBlurR.value);
   gl.uniform1f(LU.skyBrightness, +skyBrightnessR.value);
@@ -3231,7 +3366,8 @@ function render() {
       zoom * (3.2 / cameraDistance) *
           (Math.tan(Math.PI / 8) / Math.tan(cameraFov * Math.PI / 360));
   const layeredMaxBlur = layersMode ?
-      (+dofBlurR.value || 0) * cssPixelScale * Math.pow(
+      (+dofBlurR.value || 0) * ((+dofStrengthR.value || 0) / 100) *
+      cssPixelScale * Math.pow(
           projectionScale, +dofZoomCompR.value || 0) : 0;
   gl.uniform1f(DU.maxBlur, layeredMaxBlur);
   gl.uniform1i(DU.focusLayers, Math.round(+dofFocusR.value || 1));
@@ -3268,6 +3404,7 @@ function render() {
 
 // UI events
 syncPair(depthR, depthN);
+syncPair(dofStrengthR, dofStrengthN);
 syncPair(layersR, layersN);
 syncPair(fragmentCleanupR, fragmentCleanupN);
 syncPair(layerPreErodeR, layerPreErodeN);
@@ -3282,11 +3419,17 @@ syncPair(periodR, periodN);
 ].forEach(([range, number]) => syncPair(range, number));
 cameraYawR.addEventListener('input', () => {
   yaw = +cameraYawR.value * Math.PI / 180;
+  clampCameraAngles();
+  cameraTargetYaw = yaw;
+  inertiaYaw = 0;
   autoBaseYaw = yaw;
   sched();
 });
 cameraPitchR.addEventListener('input', () => {
   pitch = +cameraPitchR.value * Math.PI / 180;
+  clampCameraAngles();
+  cameraTargetPitch = pitch;
+  inertiaPitch = 0;
   autoBasePitch = pitch;
   sched();
 });
@@ -3303,6 +3446,11 @@ cameraDistanceR.addEventListener('input', () => {
   sched();
 });
 layersOrthographic.addEventListener('change', sched);
+dofStrengthR.addEventListener('input', () => {
+  dofSettings.querySelector('.settings-panel')?.classList.toggle(
+      'disabled', (+dofStrengthR.value || 0) <= 0);
+  sched();
+});
 [
   [dofFocusR, dofFocusN], [dofBlurR, dofBlurN],
   [dofZoomCompR, dofZoomCompN],
@@ -3336,6 +3484,10 @@ autoBtn.onclick = () => {
     autoBasePitch = pitch;
     autoTime = 0;
     autoPauseUntil = 0;
+  } else {
+    cameraTargetYaw = yaw;
+    cameraTargetPitch = pitch;
+    inertiaYaw = inertiaPitch = 0;
   }
   sched();
 };
@@ -3389,7 +3541,7 @@ fragmentCleanupR.oninput = () => {
 const scheduleLayerMorph = () => {
   clearTimeout(layerMorphTimer);
   layerMorphTimer = setTimeout(() => {
-    if (currentViewMode() !== 'layers') return;
+    if (!isLayerView()) return;
     sceneCache.layers = null;
     buildMesh();
     sched();
@@ -3497,7 +3649,7 @@ document.querySelectorAll('input[name="shape"]')
       requestAnimationFrame(() => {
         rebuildDepthPreview();
         if (currentViewMode() !== 'depthmap') {
-          if (currentViewMode() === 'layers') sceneCache.layers = null;
+          if (isLayerView()) sceneCache.layers = null;
           buildMesh();
         }
         sched();
@@ -3542,8 +3694,8 @@ document.querySelectorAll('input[name="viewmode"]')
         return;
       }
       const crossfade3d = processedDepth &&
-          ((previousMode === 'surface' && targetMode === 'layers') ||
-           (previousMode === 'layers' && targetMode === 'surface'));
+          previousMode !== 'depthmap' && targetMode !== 'depthmap' &&
+          previousMode !== targetMode;
       if (crossfade3d) {
         const token = ++viewTransitionToken;
         document.querySelector(
@@ -3581,6 +3733,10 @@ function pointerDistance() {
 cv.addEventListener('pointerdown', e => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
+  // iOS exposes motion sensors only after a permission request made from a
+  // user gesture. Other mobile browsers are enabled below without a prompt.
+  if (e.pointerType !== 'mouse') void enableOrientationControl();
+  orientationCenter = null;
   activePointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
   cv.setPointerCapture(e.pointerId);
   // Mouse down is unambiguously a rotation gesture. A first touch may become
@@ -3592,6 +3748,8 @@ cv.addEventListener('pointerdown', e => {
   }
   inertiaYaw = 0;
   inertiaPitch = 0;
+  cameraTargetYaw = yaw;
+  cameraTargetPitch = pitch;
   if (activePointers.size >= 2) {
     gestureMode = 'pinch';
     drag = false;
@@ -3639,11 +3797,26 @@ cv.addEventListener('pointermove', e => {
   }
   const now = performance.now(), elapsed = Math.max(4, now - lastGestureTime),
         dx = e.clientX - lastGestureX, dy = e.clientY - lastGestureY;
-  yaw += dx * .008;
-  pitch = Math.max(-1.35, Math.min(1.35, pitch + dy * .008));
-  const instantYaw = dx * .008 / elapsed, instantPitch = dy * .008 / elapsed;
-  inertiaYaw = inertiaYaw * .65 + instantYaw * .35;
-  inertiaPitch = inertiaPitch * .65 + instantPitch * .35;
+  if (isEyeView()) {
+    const rubberDelta = (value, delta) => {
+      const edge = Math.min(1, Math.abs(value) / LAYER_ANGLE_LIMIT);
+      return delta * (.16 + .84 * (1 - edge) * (1 - edge));
+    };
+    cameraTargetYaw += rubberDelta(cameraTargetYaw, dx * .0018);
+    cameraTargetPitch += rubberDelta(cameraTargetPitch, dy * .0018);
+    cameraTargetYaw = Math.max(
+        -LAYER_ANGLE_LIMIT, Math.min(LAYER_ANGLE_LIMIT, cameraTargetYaw));
+    cameraTargetPitch = Math.max(
+        -LAYER_ANGLE_LIMIT, Math.min(LAYER_ANGLE_LIMIT, cameraTargetPitch));
+  } else {
+    yaw += dx * .008;
+    pitch += dy * .008;
+    clampCameraAngles();
+    const instantYaw = dx * .008 / elapsed,
+          instantPitch = dy * .008 / elapsed;
+    inertiaYaw = inertiaYaw * .65 + instantYaw * .35;
+    inertiaPitch = inertiaPitch * .65 + instantPitch * .35;
+  }
   lastGestureX = e.clientX;
   lastGestureY = e.clientY;
   lastGestureTime = now;
@@ -3655,6 +3828,16 @@ function finishPointer(e) {
   if (activePointers.size === 0) {
     drag = false;
     if (gestureMode === 'pinch') inertiaYaw = inertiaPitch = 0;
+    if (isEyeView() && gestureMode === 'rotate') {
+      // Release a boundary grab slightly inward. The spring velocity carries
+      // it past that point once, producing a restrained jelly-like rebound.
+      if (Math.abs(cameraTargetYaw) > LAYER_ANGLE_LIMIT * .9)
+        cameraTargetYaw =
+            Math.sign(cameraTargetYaw) * LAYER_ANGLE_LIMIT * .7;
+      if (Math.abs(cameraTargetPitch) > LAYER_ANGLE_LIMIT * .9)
+        cameraTargetPitch =
+            Math.sign(cameraTargetPitch) * LAYER_ANGLE_LIMIT * .7;
+    }
     gestureMode = 'none';
     gesturePointerId = null;
     pinchDistance = 0;
@@ -3672,6 +3855,10 @@ cv.addEventListener('wheel', e => {
   sched();
 }, {passive: false});
 cv.ondblclick = resetCamera;
+
+if ('DeviceOrientationEvent' in window &&
+    typeof window.DeviceOrientationEvent.requestPermission !== 'function')
+  void enableOrientationControl();
 
 function setStereogramView(open) {
   thumb.classList.toggle('stereogram-view', open);

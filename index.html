@@ -37,18 +37,21 @@
       <button id="auto">▶</button>
 
       <div class="seg">
+        <label title="Eye view"><input type="radio" name="viewmode" value="eye" checked><span>◉</span></label>
+        <label title="Layers"><input type="radio" name="viewmode" value="layers"><span>≡</span></label>
+        <label title="3D"><input type="radio" name="viewmode" value="surface"><span>❍</span></label>
+        <label title="Depth map"><input type="radio" name="viewmode" value="depthmap"><span>◩</span></label>
+      </div>
+
+      <div class="seg">
         <label><input type="radio" name="shape" value="1" checked><span>◠</span></label>
         <label><input type="radio" name="shape" value="-1"><span>◡</span></label>
       </div>
 
-      <div class="seg">
-        <label><input type="radio" name="viewmode" value="surface" checked><span>❍</span></label>
-        <label><input type="radio" name="viewmode" value="layers"><span>≡</span></label>
-        <label><input type="radio" name="viewmode" value="depthmap"><span>◩</span></label>
-      </div>
-
-      <label class="range">↕︎ <input id="depth" type="range" min="0" max="220" step="1" value="35"><input id="depthNum"
-          class="num" type="number" step="1" value="35"></label>
+      <label id="depthControl" class="range" hidden>↕︎ <input id="depth" type="range" min="0" max="100" step="1" value="35"><input id="depthNum"
+          class="num" type="number" min="0" max="100" step="1" value="35"></label>
+      <label id="dofStrengthControl" class="range">↕︎ <input id="dofStrength" type="range" min="0" max="100" step="1" value="0"><input id="dofStrengthNum"
+          class="num" type="number" min="0" max="100" step="1" value="0"></label>
       <label class="range" hidden>≡ <input id="layers" type="range" min="16" max="16" step="1" value="16"><input id="layersNum"
           class="num" type="number" step="1" value="16"></label>
       <label class="range" hidden>✂ <input id="fragmentCleanup" type="range" min="2" max="2" step="1" value="2"><input id="fragmentCleanupNum"
@@ -75,7 +78,8 @@
           <button id="downloadStl" aria-label="Скачать меш STL">STL</button>
         </div>
         <div id="layerDownloads" hidden>
-          <button id="downloadLayersPng" aria-label="Скачать сведённые слои PNG">PNG</button>
+          <button id="layersFullscreen" aria-label="Открыть слои на весь экран"
+              title="На весь экран">⛶</button>
         </div>
         <details id="skySettings" class="floating-settings" hidden open>
           <summary>Фон</summary>
@@ -99,7 +103,7 @@
         <img id="thumb" hidden alt="Исходная стереограмма" role="button" tabindex="0" aria-label="Открыть стереограмму на весь экран" aria-expanded="false">
       </section>
       <aside id="settingsSidebar" hidden>
-        <details id="cameraSettings" class="settings" open>
+        <details id="cameraSettings" class="settings" hidden>
           <summary>Камера</summary>
           <div class="settings-panel">
             <label class="range">Yaw <input id="cameraYaw" type="range" min="-180" max="180" step="1" value="-13"><input id="cameraYawNum" class="num" type="number" min="-180" max="180" step="1" value="-13"></label>
@@ -114,12 +118,12 @@
           <summary>DoF</summary>
           <div class="settings-panel">
             <label class="range">Фокус <input id="dofFocus" type="range" min="1" max="8" step="1" value="2"><input id="dofFocusNum" class="num" type="number" min="1" max="8" step="1" value="2"></label>
-            <label class="range">Радиус <input id="dofBlur" type="range" min="0" max="16" step="0.1" value="4.5"><input id="dofBlurNum" class="num" type="number" min="0" max="16" step="0.1" value="4.5"></label>
+            <label class="range">Радиус <input id="dofBlur" type="range" min="0" max="16" step="0.1" value="1"><input id="dofBlurNum" class="num" type="number" min="0" max="16" step="0.1" value="1"></label>
             <label class="range">Zoom comp <input id="dofZoomComp" type="range" min="0" max="2" step="0.05" value="0.7"><input id="dofZoomCompNum" class="num" type="number" min="0" max="2" step="0.05" value="0.7"></label>
             <label class="range">Кривая <input id="dofRate" type="range" min="0.1" max="20" step="0.1" value="2"><input id="dofRateNum" class="num" type="number" min="0.1" max="20" step="0.1" value="2"></label>
             <label class="range">Степень <input id="dofPower" type="range" min="0.25" max="4" step="0.05" value="1.5"><input id="dofPowerNum" class="num" type="number" min="0.25" max="4" step="0.05" value="1.5"></label>
-            <label class="range">Sigma <input id="dofSigma" type="range" min="0.1" max="2" step="0.05" value="0.75"><input id="dofSigmaNum" class="num" type="number" min="0.1" max="2" step="0.05" value="0.75"></label>
-            <label class="range">Sigma min <input id="dofSigmaMin" type="range" min="0.1" max="2" step="0.05" value="0.75"><input id="dofSigmaMinNum" class="num" type="number" min="0.1" max="2" step="0.05" value="0.75"></label>
+            <label class="range">Sigma <input id="dofSigma" type="range" min="0.1" max="2" step="0.05" value="1"><input id="dofSigmaNum" class="num" type="number" min="0.1" max="2" step="0.05" value="1"></label>
+            <label class="range">Sigma min <input id="dofSigmaMin" type="range" min="0.1" max="2" step="0.05" value="1"><input id="dofSigmaMinNum" class="num" type="number" min="0.1" max="2" step="0.05" value="1"></label>
             <label class="range">Граница <input id="dofDepthFalloff" type="range" min="0" max="200" step="1" value="55"><input id="dofDepthFalloffNum" class="num" type="number" min="0" max="200" step="1" value="55"></label>
             <label class="range">Mix start <input id="dofMixStart" type="range" min="0" max="2" step="0.05" value="0.15"><input id="dofMixStartNum" class="num" type="number" min="0" max="2" step="0.05" value="0.15"></label>
             <label class="range">Mix full <input id="dofMixEnd" type="range" min="0.1" max="4" step="0.05" value="0.1"><input id="dofMixEndNum" class="num" type="number" min="0.1" max="4" step="0.05" value="0.1"></label>

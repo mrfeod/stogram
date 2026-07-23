@@ -4,7 +4,7 @@ layout(location=0) in vec2 aXY;
 layout(location=1) in float aDepth;
 layout(location=2) in vec2 aGradient;
 uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uPatternTime,uBackPass;
-uniform float uCameraDistance,uFov;
+uniform float uCameraDistance,uFov,uOrthographic;
 uniform sampler2D uDepthTex;
 uniform float uUseDepthTex;
 out vec2 vSourceUV;
@@ -81,6 +81,17 @@ void main(){
   vLocalNormal=n;
   vLocalZ=localZ;
   n=normalize(rotate3(n));
+  if(uOrthographic>0.5){
+    float orthoScale=0.75444174*uZoom;
+    gl_Position=vec4(p.x*orthoScale/uAspect,p.y*orthoScale,-p.z*0.5,1.0);
+    vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
+        0.5-aXY.y/(2.0*uSourceAspect));
+    vSurfaceKind=side?1.0:((auxiliary||layerBack)?2.0:0.0);
+    vWallT=side&&aDepth<-2.5?1.0:0.0;
+    vSideNormal=side?aGradient:vec2(0.0);
+    vNormal=n;vWorldPos=p;
+    return;
+  }
   float camDist=uCameraDistance;
   float cz=camDist-p.z;
   float f=1.0/tan(radians(uFov)*0.5);
@@ -225,43 +236,119 @@ void main(){}`;
 export const LAYER_G_VERTEX_SHADER = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 aXY;
-uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uBackPass;
+uniform float uYaw,uPitch,uDepthScale,uSign,uZoom,uAspect,uSourceCrop,uSourceAspect,uImageAspect,uBackPass;
 uniform float uCameraDistance,uFov,uOrthographic;
+uniform float uEyeView;
+uniform vec2 uViewport;
 uniform float uLayerLevels[16];
+uniform int uBackgroundLayer;
+uniform float uBackgroundLevel;
+uniform vec4 uLayerBounds;
 out vec2 vSourceUV;
 out vec2 vMaskUV;
 out vec3 vNormal;
 out vec3 vWorldPos;
+out vec2 vBackgroundMin;
+out vec2 vBackgroundMax;
 flat out int vLayerIndex;
 vec3 rotate3(vec3 p){
   float cy=cos(uYaw),sy=sin(uYaw),cp=cos(uPitch),sp=sin(uPitch);
   vec3 q=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);
   return vec3(q.x,q.y*cp-q.z*sp,q.y*sp+q.z*cp);
 }
-void main(){
-  int layer=gl_InstanceID;
-  float depth=uSign<0.0?1.0-uLayerLevels[layer]:uLayerLevels[layer];
-  float z=depth*max(uDepthScale,0.01)-uBackPass*0.00025;
-  vec3 p=rotate3(vec3(aXY,z));
-  vec3 n=normalize(rotate3(vec3(0.0,0.0,uBackPass>0.5?-1.0:1.0)));
+vec4 projectLayerPoint(vec3 p){
   if(uOrthographic>0.5){
-    // Match the apparent scale of the default 45 degree / 3.2 perspective
-    // camera, while keeping every layer equally large regardless of depth.
     float orthoScale=0.75444174*uZoom;
-    gl_Position=vec4(p.x*orthoScale/uAspect,p.y*orthoScale,-p.z*0.5,1.0);
-    vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
-        0.5-aXY.y/(2.0*uSourceAspect));
-    vMaskUV=vec2(aXY.x*0.5+0.5,0.5-aXY.y/(2.0*uSourceAspect));
-    vNormal=n;vWorldPos=p;vLayerIndex=layer;
-    return;
+    return vec4(p.x*orthoScale/uAspect,p.y*orthoScale,-p.z*0.5,1.0);
   }
   float cz=uCameraDistance-p.z,f=1.0/tan(radians(uFov)*0.5);
   float nearP=.1,farP=30.0,zEye=-cz;
   float A=(farP+nearP)/(nearP-farP),B=(2.0*farP*nearP)/(nearP-farP);
-  gl_Position=vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
-  vSourceUV=vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
-      0.5-aXY.y/(2.0*uSourceAspect));
-  vMaskUV=vec2(aXY.x*0.5+0.5,0.5-aXY.y/(2.0*uSourceAspect));
+  return vec4(p.x*f*uZoom/uAspect,p.y*f*uZoom,A*zEye+B,cz);
+}
+void main(){
+  int layer=gl_InstanceID;
+  vec2 planeUV=(aXY-vec2(uLayerBounds.x,uLayerBounds.z))/
+      max(vec2(uLayerBounds.y-uLayerBounds.x,
+               uLayerBounds.w-uLayerBounds.z),vec2(1e-5));
+  vec2 backgroundExtent=uAspect>uImageAspect?
+      vec2(uImageAspect/uAspect,1.0):
+      vec2(1.0,uAspect/uImageAspect);
+  // Cover two extra screen pixels on every side. Without this small
+  // geometric overscan, rasterisation can expose the clear colour along the
+  // exact edge of the camera-facing image.
+  vec2 eyeBackgroundExtent=backgroundExtent+
+      4.0/max(uViewport,vec2(1.0));
+  float depth=uSign<0.0?1.0-uLayerLevels[layer]:uLayerLevels[layer];
+  float z=depth*max(uDepthScale,0.01)-uBackPass*0.00025;
+  bool background=layer==uBackgroundLayer;
+  // The rear image is a camera-facing portal, not the back wall of a visible
+  // box. Foreground cards keep their normal 3D rotation and parallax.
+  bool eyeView=uEyeView>0.5;
+  vec3 p=eyeView&&background?vec3(aXY,z):rotate3(vec3(aXY,z));
+  vec3 n=eyeView&&background?
+      vec3(0.0,0.0,uBackPass>0.5?-1.0:1.0):
+      normalize(rotate3(vec3(0.0,0.0,uBackPass>0.5?-1.0:1.0)));
+  vec4 clip=projectLayerPoint(p);
+  if(eyeView&&background){
+    // The rear layer is the viewport itself: it always contains the complete
+    // original image and replaces the old environment cylinder.
+    clip.xy=(planeUV*2.0-1.0)*eyeBackgroundExtent*clip.w;
+    vBackgroundMin=vec2(-2.0);
+    vBackgroundMax=vec2(2.0);
+  }else if(eyeView){
+    float backgroundDepth=uSign<0.0?
+        1.0-uBackgroundLevel:uBackgroundLevel;
+    float backgroundZ=backgroundDepth*max(uDepthScale,0.01)-
+        uBackPass*0.00025;
+    vec2 c0=vec2(uLayerBounds.x,uLayerBounds.z);
+    vec2 c1=vec2(uLayerBounds.y,uLayerBounds.z);
+    vec2 c2=vec2(uLayerBounds.x,uLayerBounds.w);
+    vec2 c3=vec2(uLayerBounds.y,uLayerBounds.w);
+    vec4 lc0=projectLayerPoint(rotate3(vec3(c0,z)));
+    vec4 lc1=projectLayerPoint(rotate3(vec3(c1,z)));
+    vec4 lc2=projectLayerPoint(rotate3(vec3(c2,z)));
+    vec4 lc3=projectLayerPoint(rotate3(vec3(c3,z)));
+    vec4 bc0=projectLayerPoint(vec3(c0,backgroundZ));
+    vec2 l0=lc0.xy/lc0.w,l1=lc1.xy/lc1.w;
+    vec2 l2=lc2.xy/lc2.w,l3=lc3.xy/lc3.w;
+    vec2 layerMin=min(min(l0,l1),min(l2,l3));
+    vec2 layerMax=max(max(l0,l1),max(l2,l3));
+    vec2 backgroundMin=-eyeBackgroundExtent;
+    vec2 backgroundMax=eyeBackgroundExtent;
+    vec2 layerNdc=clip.xy/clip.w;
+    vec2 layerCenter=(layerMin+layerMax)*0.5;
+    vec2 negativeExtent=max(layerCenter-layerMin,vec2(1e-5));
+    vec2 positiveExtent=max(layerMax-layerCenter,vec2(1e-5));
+    vec2 requiredScale=max(
+        vec2(1.0),max(
+          (layerCenter-backgroundMin)/negativeExtent,
+          (backgroundMax-layerCenter)/positiveExtent));
+    float coverScale=max(requiredScale.x,requiredScale.y);
+    // Preserve the original projected centre and perspective deformation.
+    // Expand only as much as necessary to cover the rear rectangle.
+    vec2 fittedNdc=layerCenter+(layerNdc-layerCenter)*coverScale;
+    clip.xy=fittedNdc*clip.w;
+    // Rotation can move a corner geometrically behind the camera-facing rear
+    // card. Keep every foreground layer just in front of that card so the
+    // depth test cannot punch background-shaped holes through it.
+    float backgroundNdcZ=bc0.z/bc0.w;
+    float foregroundOrder=max(
+        1.0,float(uBackgroundLayer-layer));
+    float fittedNdcZ=min(
+        clip.z/clip.w,backgroundNdcZ-foregroundOrder*0.00035);
+    clip.z=fittedNdcZ*clip.w;
+    vBackgroundMin=backgroundMin;
+    vBackgroundMax=backgroundMax;
+  }else{
+    vBackgroundMin=vec2(-2.0);
+    vBackgroundMax=vec2(2.0);
+  }
+  gl_Position=clip;
+  vSourceUV=eyeView&&background?vec2(planeUV.x,1.0-planeUV.y):
+      vec2(mix(uSourceCrop,1.0,aXY.x*0.5+0.5),
+           0.5-aXY.y/(2.0*uSourceAspect));
+  vMaskUV=vec2(planeUV.x,1.0-planeUV.y);
   vNormal=n;vWorldPos=p;vLayerIndex=layer;
 }`;
 
@@ -272,13 +359,20 @@ in vec2 vSourceUV;
 in vec2 vMaskUV;
 in vec3 vNormal;
 in vec3 vWorldPos;
+in vec2 vBackgroundMin;
+in vec2 vBackgroundMax;
 flat in int vLayerIndex;
 uniform sampler2D uSourceTex;
 uniform sampler2DArray uLayerMasks;
+uniform vec2 uViewport;
 layout(location=0) out vec4 outAlbedo;
 layout(location=1) out vec4 outNormal;
 layout(location=2) out vec4 outPosition;
 void main(){
+  vec2 fragmentNdc=gl_FragCoord.xy/max(uViewport,vec2(1.0))*2.0-1.0;
+  if(fragmentNdc.x<vBackgroundMin.x||fragmentNdc.x>vBackgroundMax.x||
+      fragmentNdc.y<vBackgroundMin.y||fragmentNdc.y>vBackgroundMax.y)
+    discard;
   float mask=texture(uLayerMasks,vec3(clamp(vMaskUV,0.0,1.0),float(vLayerIndex))).r;
   float edgeWidth=max(fwidth(mask)*1.35,1.0/255.0);
   float coverage=smoothstep(0.5-edgeWidth,0.5+edgeWidth,mask);
