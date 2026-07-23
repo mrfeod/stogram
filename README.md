@@ -1,6 +1,6 @@
 <h1><img src="src/favicon/android-chrome-192x192.png" alt="Stogram icon" height="48" align="bottom"> <a href="https://mrfeod.github.io/stogram/">Stogram: Stereogram Viewer</a></h1>
 
-An interactive [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer. It reconstructs depth, renders it as a shaded 3D surface or layers, and lets geometry and texture be replaced independently.
+An interactive [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) and depth map viewer. It reconstructs depth and renders it in Eye View, as discrete layers, or as a shaded 3D surface. Geometry and texture can be replaced independently.
 
 <p align="center">
   Autostereogram<br>
@@ -8,15 +8,16 @@ An interactive [autostereogram](https://en.wikipedia.org/wiki/Autostereogram) an
   ↓<br>Depth map<br>
   <img src="src/demo/depth.jpg" alt="Reconstructed camel depth map" height="256"><br>
   ↓<br>
-  3D surface<br>
-  <img src="src/demo/example.gif" alt="3D surface" height="256"><br>
+  3D Surface or Human-eye-like view<br>
+  <img src="src/demo/example.gif" alt="3D surface" height="256">
+  <img src="src/demo/example_eye.gif" alt="Human-eye-like view" height="256"><br>
 </p>
 
 ## Features
 
 - Depth map reconstruction from a color autostereogram.
 - Loading grayscale images as ready-made depth maps.
-- Surface, layer, and 2D depth map modes.
+- Eye View, layer, 3D surface, and 2D depth map modes.
 - Convex and concave geometry.
 - Independent texture replacement without losing the original stereogram and depth.
 - WebGPU-accelerated reconstruction and filtering with a CPU fallback.
@@ -39,15 +40,16 @@ A depth map replaces the geometry while preserving the current texture. If there
 | `↻` | Recalculate the depth map |
 | `⊕` | Reset the camera |
 | `▶` | Auto-rotation |
-| `◠` / `◡` | Convex / concave geometry |
-| `❍` | 3D surface |
+| `◉` | Eye View |
 | `≡` | Layers |
+| `❍` | 3D surface |
 | `◩` | 2D depth map |
+| `◠` / `◡` | Convex / concave geometry |
+| `⛶` | Fullscreen |
 
 | Slider | Action |
 | --- | --- |
 | `↕︎` | Depth scale |
-| `≡` | Number of layers |
 | `↔` | Stereogram period |
 
 ## Controls
@@ -55,6 +57,7 @@ A depth map replaces the geometry while preserving the current texture. If there
 - Drag — rotation.
 - Mouse wheel or pinch — zoom.
 - Double-click — reset the camera.
+- Tap the texture preview — fullscreen stereogram viewing.
 - Regular drop — load a geometry source.
 - Drop onto `▧` or `Shift + drop` — replace the texture.
 
@@ -79,5 +82,5 @@ Soft contour coverage (antialiasing)
     ↓ robust 1–99% depth normalization
 Ready depth map
     ↓
-Smoothed closed 3D mesh, discrete layers, PNG or STL
+Eye View, discrete layers, smoothed closed 3D mesh, PNG or STL
 ```
