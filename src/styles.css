@@ -319,6 +319,15 @@
       z-index: 100
     }
 
+    body.layer-fullscreen,
+    body.stereogram-fullscreen {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100dvh;
+      overflow: hidden
+    }
+
     #stage:fullscreen #thumb,
     #stage:-webkit-full-screen #thumb,
     body.layer-fullscreen #thumb {
@@ -565,7 +574,7 @@
       z-index: 1000;
       inset: 0;
       width: 100vw;
-      height: 100vh;
+      height: 100dvh;
       max-height: none;
       object-fit: contain;
       border: 0;
@@ -573,4 +582,15 @@
       background: #000;
       cursor: zoom-out;
       opacity: 1
+    }
+
+    #thumb:fullscreen,
+    #thumb:-webkit-full-screen {
+      width: 100vw;
+      height: 100dvh;
+      max-height: none;
+      object-fit: contain;
+      border: 0;
+      border-radius: 0;
+      background: #000
     }

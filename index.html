@@ -24,6 +24,9 @@
   <link rel="apple-touch-icon" sizes="180x180" href="src/favicon/apple-touch-icon.png">
   <link rel="manifest" href="src/favicon/site.webmanifest">
   <meta name="theme-color" content="#101114">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="stylesheet" href="src/styles.css">
 </head>
 
@@ -50,8 +53,8 @@
 
       <label id="depthControl" class="range" hidden>↕︎ <input id="depth" type="range" min="0" max="100" step="1" value="35"><input id="depthNum"
           class="num" type="number" min="0" max="100" step="1" value="35"></label>
-      <label id="dofStrengthControl" class="range">↕︎ <input id="dofStrength" type="range" min="0" max="100" step="1" value="0"><input id="dofStrengthNum"
-          class="num" type="number" min="0" max="100" step="1" value="0"></label>
+      <label id="dofStrengthControl" class="range">↕︎ <input id="dofStrength" type="range" min="0" max="100" step="1" value="35"><input id="dofStrengthNum"
+          class="num" type="number" min="0" max="100" step="1" value="35"></label>
       <label class="range" hidden>≡ <input id="layers" type="range" min="16" max="16" step="1" value="16"><input id="layersNum"
           class="num" type="number" step="1" value="16"></label>
       <label class="range" hidden>✂ <input id="fragmentCleanup" type="range" min="2" max="2" step="1" value="2"><input id="fragmentCleanupNum"

@@ -3222,12 +3222,12 @@ downloadStlBtn.onclick = () => {
       'stogram-mesh.stl');
 };
 
-function layerFullscreenElement() {
+function fullscreenElement() {
   return document.fullscreenElement || document.webkitFullscreenElement;
 }
 async function toggleLayersFullscreen() {
   if (!isLayerView()) return;
-  if (layerFullscreenElement()) {
+  if (fullscreenElement() === stage) {
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
     if (exit) await exit.call(document);
     return;
@@ -3240,7 +3240,7 @@ async function toggleLayersFullscreen() {
   const request = stage.requestFullscreen || stage.webkitRequestFullscreen;
   if (request) {
     try {
-      await request.call(stage);
+      await request.call(stage, {navigationUI: 'hide'});
       return;
     } catch (error) {
       console.info('Native fullscreen is unavailable:', error);
@@ -3253,7 +3253,7 @@ async function toggleLayersFullscreen() {
 }
 layersFullscreenBtn.onclick = () => void toggleLayersFullscreen();
 function syncLayersFullscreen() {
-  const active = !!layerFullscreenElement() ||
+  const active = fullscreenElement() === stage ||
       document.body.classList.contains('layer-fullscreen');
   layersFullscreenBtn.classList.toggle('active', active);
   layersFullscreenBtn.textContent = active ? '×' : '⛶';
@@ -3262,8 +3262,15 @@ function syncLayersFullscreen() {
           'Открыть слои на весь экран');
   resize();
 }
-addEventListener('fullscreenchange', syncLayersFullscreen);
-addEventListener('webkitfullscreenchange', syncLayersFullscreen);
+function syncFullscreenUi() {
+  syncLayersFullscreen();
+  if (thumb.classList.contains('stereogram-view') &&
+      fullscreenElement() !== thumb &&
+      !document.body.classList.contains('stereogram-fullscreen'))
+    void setStereogramView(false, false);
+}
+addEventListener('fullscreenchange', syncFullscreenUi);
+addEventListener('webkitfullscreenchange', syncFullscreenUi);
 addEventListener('keydown', event => {
   if (event.key === 'Escape' &&
       document.body.classList.contains('layer-fullscreen')) {
@@ -3358,8 +3365,9 @@ function render() {
   gl.bindTexture(gl.TEXTURE_2D, litTex);
   gl.uniform1i(DU.backdrop, 2);
   gl.uniform2f(DU.texel, 1 / cv.width, 1 / cv.height);
-  const cssPixelScale = cv.width /
-      Math.max(1, stage.getBoundingClientRect().width);
+  // Express the kernel in output pixels relative to a 720p frame. Unlike
+  // devicePixelRatio this stays stable when browser/page zoom changes.
+  const renderPixelScale = cv.height / 720;
   // Scale screen-space blur with the projected object size. This cancels the
   // apparent increase in blur when the camera is zoomed out.
   const projectionScale = layersOrthographic.checked ? zoom :
@@ -3367,7 +3375,7 @@ function render() {
           (Math.tan(Math.PI / 8) / Math.tan(cameraFov * Math.PI / 360));
   const layeredMaxBlur = layersMode ?
       (+dofBlurR.value || 0) * ((+dofStrengthR.value || 0) / 100) *
-      cssPixelScale * Math.pow(
+      renderPixelScale * Math.pow(
           projectionScale, +dofZoomCompR.value || 0) : 0;
   gl.uniform1f(DU.maxBlur, layeredMaxBlur);
   gl.uniform1i(DU.focusLayers, Math.round(+dofFocusR.value || 1));
@@ -3860,23 +3868,40 @@ if ('DeviceOrientationEvent' in window &&
     typeof window.DeviceOrientationEvent.requestPermission !== 'function')
   void enableOrientationControl();
 
-function setStereogramView(open) {
+async function setStereogramView(open, changeFullscreen = true) {
   thumb.classList.toggle('stereogram-view', open);
+  document.body.classList.toggle(
+      'stereogram-fullscreen', open && fullscreenElement() !== thumb);
   thumb.setAttribute('aria-expanded', String(open));
   thumb.setAttribute(
       'aria-label', open ? 'Закрыть полноэкранную стереограмму' :
                            'Открыть стереограмму на весь экран');
+  if (!changeFullscreen) return;
+  if (open) {
+    const request = thumb.requestFullscreen || thumb.webkitRequestFullscreen;
+    if (request) {
+      try {
+        await request.call(thumb, {navigationUI: 'hide'});
+        document.body.classList.remove('stereogram-fullscreen');
+      } catch (error) {
+        console.info('Native image fullscreen is unavailable:', error);
+      }
+    }
+  } else if (fullscreenElement() === thumb) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) await exit.call(document);
+  }
 }
 thumb.addEventListener('click', () =>
-  setStereogramView(!thumb.classList.contains('stereogram-view')));
+  void setStereogramView(!thumb.classList.contains('stereogram-view')));
 thumb.addEventListener('keydown', e => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   e.preventDefault();
-  setStereogramView(!thumb.classList.contains('stereogram-view'));
+  void setStereogramView(!thumb.classList.contains('stereogram-view'));
 });
 addEventListener('keydown', e => {
   if (e.key === 'Escape' && thumb.classList.contains('stereogram-view'))
-    setStereogramView(false);
+    void setStereogramView(false);
 });
 
 resize();
