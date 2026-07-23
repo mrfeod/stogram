@@ -676,11 +676,14 @@ function orientedTilt(beta, gamma) {
   return {x: gamma, y: beta};
 }
 function handleDeviceOrientation(event) {
-  if (!isEyeView() || autoRotate ||
-      activePointers.size || event.beta == null || event.gamma == null)
+  if (!isEyeView() || activePointers.size ||
+      event.beta == null || event.gamma == null)
     return;
   const tilt = orientedTilt(event.beta, event.gamma);
   if (!orientationCenter) {
+    // A real sensor sample takes precedence over the decorative animation.
+    // Previously auto-rotation caused every orientation event to be ignored.
+    disableAutoRotate();
     orientationCenter = tilt;
     return;
   }
@@ -696,7 +699,8 @@ function handleDeviceOrientation(event) {
   sched();
 }
 async function enableOrientationControl() {
-  if (orientationControlState !== 'idle' ||
+  if (orientationControlState === 'enabled' ||
+      orientationControlState === 'requesting' ||
       !('DeviceOrientationEvent' in window))
     return;
   orientationControlState = 'requesting';
@@ -719,6 +723,9 @@ async function enableOrientationControl() {
     console.info('Device orientation control is unavailable:', error);
   }
 }
+screen.orientation?.addEventListener('change', () => {
+  orientationCenter = null;
+});
 function applyCameraMode(mode) {
   if (mode === activeCameraMode || !cameraStates[mode]) return;
   const previousYaw = yaw, previousPitch = pitch;
